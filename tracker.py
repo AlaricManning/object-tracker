@@ -81,79 +81,56 @@ class YOLONorfairTracker:
             self.clicking_pos = (x, y)
 
     def yolo_detections_to_norfair_detections(self, yolo_results):
-        """Convert YOLO detections to Norfair Detection objects"""
         norfair_detections = []
+        result = yolo_results[0]  # Single frame result
+        boxes = result.boxes
+        if boxes is None or len(boxes) == 0:
+            return norfair_detections
 
-        # Get detection results
-        for result in yolo_results:
-            boxes = result.boxes
-            for box in boxes:
-                # Get bounding box coordinates
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+        xyxy = boxes.xyxy.cpu().numpy()
+        conf = boxes.conf.cpu().numpy()
+        cls = boxes.cls.cpu().numpy().astype(int)
 
-                # Get confidence and class
-                conf = float(box.conf[0])
-                cls = int(box.cls[0])
-                class_name = self.model.names[cls]
-
-                # Skip if confidence is too low
-                if conf < self.conf_threshold:
-                    continue
-
-                # Calculate center point and dimensions
-                center_x = (x1 + x2) / 2
-                center_y = (y1 + y2) / 2
-                width = x2 - x1
-                height = y2 - y1
-
-                # Create Norfair detection
-                # Norfair expects points in format [[x, y]]
-                detection = Detection(
-                    points=np.array([[center_x, center_y]]),
-                    scores=np.array([conf]),
-                    data={
-                        'bbox': [x1, y1, x2, y2],
-                        'class': cls,
-                        'class_name': class_name,
-                        'confidence': conf
-                    }
-                )
-                norfair_detections.append(detection)
-
+        for (x1, y1, x2, y2), c, cl in zip(xyxy, conf, cls):
+            if c < self.conf_threshold:
+                continue
+            center = np.array([[ (x1+x2)/2, (y1+y2)/2 ]])
+            norfair_detections.append(Detection(
+                points=center,
+                scores=np.array([c]),
+                data={
+                    'bbox': [x1, y1, x2, y2],
+                    'class_id': cl,
+                    'class_name': self.model.names[cl],
+                    'confidence': float(c)
+                }
+            ))
         return norfair_detections
 
     def check_click_on_object(self, tracked_objects):
-        """Check if user clicked on any tracked object"""
         if self.clicking_pos is None:
             return
-
         click_x, click_y = self.clicking_pos
-        self.clicking_pos = None  # Reset
+        self.clicking_pos = None
 
         for obj in tracked_objects:
-            if not obj.live_points.any():
+            if obj.last_detection is None or 'bbox' not in obj.last_detection.data:
                 continue
-
-            bbox = obj.estimate[0] if hasattr(obj, 'estimate') else None
-            if bbox is None and 'bbox' in obj.last_detection.data:
-                bbox = obj.last_detection.data['bbox']
-
-            if bbox is not None:
-                x1, y1, x2, y2 = bbox
-                # Check if click is inside bounding box
-                if x1 <= click_x <= x2 and y1 <= click_y <= y2:
-                    if obj.id in self.selected_track_ids:
-                        self.selected_track_ids.remove(obj.id)
-                        print(f"Unselected object #{obj.id}")
-                    else:
-                        self.selected_track_ids.add(obj.id)
-                        print(f"Selected object #{obj.id} ({obj.last_detection.data.get('class_name', 'unknown')})")
-                    break
+            x1, y1, x2, y2 = obj.last_detection.data['bbox']
+            if x1 <= click_x <= x2 and y1 <= click_y <= y2:
+                if obj.id in self.selected_track_ids:
+                    self.selected_track_ids.remove(obj.id)
+                    print(f"Unselected object #{obj.id}")
+                else:
+                    self.selected_track_ids.add(obj.id)
+                    class_name = obj.last_detection.data.get('class_name', 'unknown')
+                    print(f"Selected object #{obj.id} ({class_name})")
+                break
 
     def draw_tracked_objects(self, frame, tracked_objects):
         """Draw bounding boxes and labels for tracked objects"""
         for obj in tracked_objects:
-            if not obj.live_points.any():
+            if not hasattr(obj, 'last_detection') or obj.last_detection.points is None:
                 continue
 
             # Skip if in selective mode and not selected
