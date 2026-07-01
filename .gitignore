@@ -11,6 +11,10 @@
 .DS_Store
 Thumbs.db
 
+# Session capture output — exclude video, keep metadata as examples
+sessions/**/*.mp4
+*.pt
+
 # IDE
 .vscode/
 .idea/
