@@ -10,10 +10,12 @@ A powerful real-time object detection and tracking application using state-of-th
   - **Track All**: Automatically track all detected objects
   - **Selective Mode**: Click on objects to track only specific ones
 - **Object Classification**: Shows class labels and confidence scores
-- **Color-coded Boxes**: Different colors for different object classes
+- **Color-coded Boxes**: Different colors for different object classes; orange for target classes
 - **High Performance**: ~15-30 FPS on CPU, 60+ FPS on GPU
 - **Flexible Models**: Choose from 5 YOLO model sizes for your hardware
 - **Live Statistics**: FPS counter, detection count, tracking count
+- **Clip-based Recording**: Automatically saves video clips triggered by target class detections, with 2s pre/post-roll buffers and confidence-tier classification (`hits` vs `near_misses`)
+- **Per-frame Metadata Export**: Writes detection data (track ID, class, confidence, bounding box, timestamp) to JSON Lines for downstream pipeline ingestion
 
 ## What Can It Detect?
 
@@ -94,10 +96,32 @@ python tracker.py --conf 0.2
 python tracker.py --selective
 ```
 
+**Record clips when a target class is detected**:
+```bash
+# Save clips to sessions/ whenever a person is detected
+python tracker.py --target-class person
+
+# Multiple target classes
+python tracker.py --target-class person car
+
+# Custom confidence thresholds (hit = clear detection, near-miss = uncertain)
+python tracker.py --target-class person --hit-threshold 0.80 --near-miss-threshold 0.30
+```
+
+**Export per-frame detection metadata to JSON Lines**:
+```bash
+python tracker.py --target-class person --export
+```
+
+**Custom output directory**:
+```bash
+python tracker.py --target-class person --export --output-dir /data/captures
+```
+
 **Combine Options**:
 ```bash
-# Use small model with high confidence in selective mode
-python tracker.py --model s --conf 0.4 --selective
+# Small model, selective mode, recording persons with export
+python tracker.py --model s --selective --target-class person --hit-threshold 0.75 --export
 ```
 
 ## Controls
@@ -197,6 +221,7 @@ Compared to the old OpenCV trackers (KCF, CSRT, etc.):
 ### Bounding Box Colors
 - **Different colors** = Different object classes
 - **Green (thick)** = Selected/pinned object (in selective mode)
+- **Orange (thick)** = Target class object (when `--target-class` is set)
 - **Colored (normal)** = Tracked object (in track-all mode)
 
 ### Labels
@@ -213,6 +238,7 @@ Each tracked object shows:
 - **Detections**: Number of objects detected in current frame
 - **Tracked**: Number of objects being tracked
 - **Selected**: Number of manually selected objects (selective mode)
+- **REC / Clips saved**: Shown when `--target-class` is set; turns red while a clip is actively recording, showing the clip ID and current peak confidence
 
 ## Troubleshooting
 
@@ -221,7 +247,7 @@ Each tracked object shows:
 
 **Solutions**:
 - Ensure webcam is connected and not in use by another application
-- Try changing camera index: modify line 45 in `tracker.py` to `cv2.VideoCapture(1)` or higher
+- Try changing camera index: modify `cv2.VideoCapture(0)` in `tracker.py` to `cv2.VideoCapture(1)` or higher
 - Check camera permissions on your OS
 
 ### Low FPS / Slow Performance
@@ -287,6 +313,19 @@ Webcam → Frame → YOLOv11 Detection → Norfair Tracking → Display
                   Bounding boxes        Persistent IDs
                   Class labels         Track association
                   Confidence scores    Occlusion handling
+                                             ↓
+                                    Target class filter
+                                    (--target-class)
+                                             ↓
+                              ┌──────────────┴──────────────┐
+                         Clip recording               Metadata export
+                    (pre/post-roll buffer)          (detections.jsonl)
+                              ↓
+                   sessions/{session_id}/
+                     hits/          near_misses/
+                   clip_N.mp4      clip_N.mp4
+                   clip_N.json     clip_N.json
+                   session_summary.json
 ```
 
 ### YOLO Models
@@ -309,7 +348,17 @@ Webcam → Frame → YOLOv11 Detection → Norfair Tracking → Display
 object-tracker/
 ├── tracker.py          # Main application (YOLOv11 + Norfair)
 ├── requirements.txt    # Python dependencies
-└── README.md          # This file
+├── README.md           # This file
+└── sessions/           # Created automatically when --target-class is used
+    └── {session_id}/
+        ├── hits/           # Clips where peak confidence >= hit-threshold
+        │   ├── clip_0001.mp4
+        │   └── clip_0001.json  # Sidecar: peak conf, timestamps, detections
+        ├── near_misses/    # Clips where confidence is between thresholds
+        │   ├── clip_0002.mp4
+        │   └── clip_0002.json
+        ├── detections.jsonl    # Per-frame metadata (if --export is set)
+        └── session_summary.json
 ```
 
 ## Performance Benchmarks
@@ -328,14 +377,12 @@ Tested on different hardware configurations:
 ## Future Enhancements
 
 Possible improvements for future versions:
-- Record tracking sessions to video files
-- Export tracking data (positions, timestamps) to CSV/JSON
 - Custom object classes with fine-tuned models
 - Multiple camera support
-- Track-specific event triggers
 - Heatmap visualization
 - Path history visualization
-- Object counting and analytics
+- Storage upload (MinIO / S3 / Azure Blob) for captured sessions
+- Labeling workflow integration (CVAT / Label Studio) for near-miss clips
 
 ## Comparison: Classical vs Deep Learning Tracking
 
@@ -396,4 +443,17 @@ python tracker.py --model l --conf 0.35
 ```bash
 python tracker.py --selective
 # Only tracks what you click on
+```
+
+### Example 5: Record Person Clips with Metadata
+```bash
+python tracker.py --target-class person --hit-threshold 0.70 --near-miss-threshold 0.30 --export
+# Saves clips to sessions/{timestamp}/hits/ and near_misses/
+# Writes per-frame detections to sessions/{timestamp}/detections.jsonl
+```
+
+### Example 6: Edge Capture for Pipeline Ingestion
+```bash
+python tracker.py --model s --target-class person car --hit-threshold 0.80 --near-miss-threshold 0.35 --export --output-dir /data/captures
+# Production-style capture: clips + metadata ready for storage upload
 ```
