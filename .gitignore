@@ -15,6 +15,9 @@ Thumbs.db
 sessions/**/*.mp4
 *.pt
 
+# Local config (use config.example.yaml as the committed template)
+config.yaml
+
 # IDE
 .vscode/
 .idea/

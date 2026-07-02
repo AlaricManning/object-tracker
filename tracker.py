@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import time
 from collections import deque
@@ -7,48 +8,71 @@ from datetime import datetime
 
 import cv2
 import numpy as np
+import yaml
 from ultralytics import YOLO
 from norfair import Detection, Tracker
 
+import klv
+from uploader import S3Uploader
+
+
+def load_config(path: str) -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
+
 
 class YOLONorfairTracker:
-    def __init__(self, model_size='n', conf_threshold=0.25, track_all=True,
-                 target_classes=None, hit_threshold=0.80, near_miss_threshold=0.30,
-                 export=False, output_dir='./sessions'):
-        self.conf_threshold = conf_threshold
-        self.track_all = track_all
+    def __init__(self, config: dict):
+        model_cfg    = config.get('model', {})
+        tracking_cfg = config.get('tracking', {})
+        capture_cfg  = config.get('capture', {})
+        upload_cfg   = config.get('upload', {})
+
+        self.conf_threshold = model_cfg.get('conf_threshold', 0.25)
+        self.track_all = tracking_cfg.get('mode', 'all') == 'all'
         self.selected_track_ids = set()
         self.clicking_pos = None
 
         # Capture config
-        self.target_classes = set(target_classes) if target_classes else set()
-        self.hit_threshold = hit_threshold
-        self.near_miss_threshold = near_miss_threshold
-        self.export = export
-        self.output_dir = output_dir
+        self.target_classes      = set(capture_cfg.get('target_classes') or [])
+        self.hit_threshold       = capture_cfg.get('hit_threshold', 0.80)
+        self.near_miss_threshold = capture_cfg.get('near_miss_threshold', 0.30)
+        self.export              = capture_cfg.get('export', False)
+        self.output_dir          = capture_cfg.get('output_dir', './sessions')
+
+        # S3 uploader
+        self.uploader = None
+        if upload_cfg.get('enabled') and upload_cfg.get('s3_bucket'):
+            self.uploader = S3Uploader(
+                bucket=upload_cfg['s3_bucket'],
+                prefix=upload_cfg.get('s3_prefix', ''),
+                region=upload_cfg.get('region'),
+            )
+            print(f"S3 upload enabled: s3://{upload_cfg['s3_bucket']}/{upload_cfg.get('s3_prefix', '')}")
 
         # Session state
-        self.session_id = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
+        self.session_id    = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
         self.session_start = datetime.now()
-        self.frame_index = 0
-        self.clip_count = 0
-        self.object_counts = {}  # class_name -> set of unique track_ids seen
+        self.frame_index   = 0
+        self.clip_count    = 0
+        self.object_counts = {}
 
         # Clip state
-        self.active_clip = None
-        self.preroll = None       # deque, sized after FPS is known
+        self.active_clip   = None
+        self.preroll       = None
         self.postroll_frames = 0
 
         # Output handles
-        self.session_dir = None
+        self.session_dir   = None
         self.metadata_file = None
 
-        # Initialize YOLO model
+        # YOLO model
+        model_size = model_cfg.get('size', 'n')
         print(f"Loading YOLOv11{model_size} model...")
         self.model = YOLO(f'yolo11{model_size}.pt')
         print("Model loaded successfully!")
 
-        # Initialize Norfair tracker
+        # Norfair tracker
         self.tracker = Tracker(
             distance_function="euclidean",
             distance_threshold=100,
@@ -57,7 +81,7 @@ class YOLONorfairTracker:
             pointwise_hit_counter_max=4
         )
 
-        # Initialize webcam
+        # Webcam
         self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
             print("Error: Cannot open webcam")
@@ -66,21 +90,19 @@ class YOLONorfairTracker:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-        self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.width      = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.height     = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.record_fps = max(self.cap.get(cv2.CAP_PROP_FPS) or 20, 20)
 
-        # Size pre/post-roll buffers at 2 seconds each
-        preroll_frames = int(self.record_fps * 2)
+        preroll_frames       = int(self.record_fps * 2)
         self.postroll_frames = int(self.record_fps * 2)
-        self.preroll = deque(maxlen=preroll_frames)
+        self.preroll         = deque(maxlen=preroll_frames)
 
-        # Create session directory and open metadata file if needed
-        if self.target_classes or export:
-            self.session_dir = os.path.join(output_dir, self.session_id)
+        if self.target_classes or self.export:
+            self.session_dir = os.path.join(self.output_dir, self.session_id)
             os.makedirs(self.session_dir, exist_ok=True)
 
-        if export and self.target_classes:
+        if self.export and self.target_classes:
             jsonl_path = os.path.join(self.session_dir, 'detections.jsonl')
             self.metadata_file = open(jsonl_path, 'w')
             print(f"Exporting detection metadata to: {jsonl_path}")
@@ -92,10 +114,10 @@ class YOLONorfairTracker:
         self.colors = self._generate_colors(80)
 
         print(f"Webcam resolution: {self.width}x{self.height}")
-        print(f"Tracking mode: {'All objects' if track_all else 'Click to select'}")
+        print(f"Tracking mode: {'All objects' if self.track_all else 'Click to select'}")
         if self.target_classes:
             print(f"Target classes: {', '.join(self.target_classes)}")
-            print(f"Hit threshold: {hit_threshold:.0%} | Near-miss threshold: {near_miss_threshold:.0%}")
+            print(f"Hit threshold: {self.hit_threshold:.0%} | Near-miss threshold: {self.near_miss_threshold:.0%}")
 
     # ------------------------------------------------------------------
     # Helpers
@@ -122,7 +144,7 @@ class YOLONorfairTracker:
 
         xyxy = boxes.xyxy.cpu().numpy()
         conf = boxes.conf.cpu().numpy()
-        cls = boxes.cls.cpu().numpy().astype(int)
+        cls  = boxes.cls.cpu().numpy().astype(int)
 
         for (x1, y1, x2, y2), c, cl in zip(xyxy, conf, cls):
             if c < self.conf_threshold:
@@ -132,16 +154,15 @@ class YOLONorfairTracker:
                 points=center,
                 scores=np.array([c]),
                 data={
-                    'bbox': [x1, y1, x2, y2],
-                    'class_id': cl,
+                    'bbox':       [x1, y1, x2, y2],
+                    'class_id':   cl,
                     'class_name': self.model.names[cl],
-                    'confidence': float(c)
+                    'confidence': float(c),
                 }
             ))
         return norfair_detections
 
     def _target_detections(self, tracked_objects):
-        """Return live tracked objects matching target classes above near-miss threshold."""
         if not self.target_classes:
             return []
         hits = []
@@ -182,58 +203,89 @@ class YOLONorfairTracker:
 
     def _start_clip(self, class_name):
         self.clip_count += 1
-        clip_id = f"clip_{self.clip_count:04d}"
-        tmp_path = os.path.join(self.session_dir, f'_{clip_id}_tmp.mp4')
+        clip_id  = f"clip_{self.clip_count:04d}"
+        tmp_mp4  = os.path.join(self.session_dir, f'_{clip_id}_tmp.mp4')
+        tmp_klv  = os.path.join(self.session_dir, f'_{clip_id}_tmp.klv')
+
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(tmp_path, fourcc, self.record_fps, (self.width, self.height))
+        writer = cv2.VideoWriter(tmp_mp4, fourcc, self.record_fps, (self.width, self.height))
 
         for buffered_frame in self.preroll:
             writer.write(buffered_frame)
 
         self.active_clip = {
-            'clip_id': clip_id,
-            'tmp_path': tmp_path,
-            'writer': writer,
-            'class_name': class_name,
-            'peak_confidence': 0.0,
+            'clip_id':              clip_id,
+            'tmp_mp4':              tmp_mp4,
+            'tmp_klv':              tmp_klv,
+            'writer':               writer,
+            'klv_file':             open(tmp_klv, 'wb'),
+            'class_name':           class_name,
+            'peak_confidence':      0.0,
             'frames_since_detection': 0,
-            'detections': [],
-            'start_time': datetime.now().isoformat(),
-            'start_frame': self.frame_index,
+            'detections':           [],
+            'start_time':           datetime.now().isoformat(),
+            'start_frame':          self.frame_index,
         }
         print(f"[CLIP] Started {clip_id} for '{class_name}'")
+
+    def _remux_to_ts(self, mp4_path: str, ts_path: str):
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-i', mp4_path, '-c', 'copy', '-f', 'mpegts', ts_path],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg remux failed:\n{result.stderr.decode()}")
 
     def _close_clip(self):
         clip = self.active_clip
         clip['writer'].release()
+        clip['klv_file'].close()
 
-        tier = 'hits' if clip['peak_confidence'] >= self.hit_threshold else 'near_misses'
+        tier    = 'hits' if clip['peak_confidence'] >= self.hit_threshold else 'near_misses'
         tier_dir = os.path.join(self.session_dir, tier)
         os.makedirs(tier_dir, exist_ok=True)
 
-        final_mp4 = os.path.join(tier_dir, f"{clip['clip_id']}.mp4")
-        os.rename(clip['tmp_path'], final_mp4)
+        clip_id  = clip['clip_id']
+        ts_path  = os.path.join(tier_dir, f'{clip_id}.ts')
+        klv_path = os.path.join(tier_dir, f'{clip_id}.klv')
 
+        # Remux MP4 → MPEG-TS, then clean up temp MP4
+        self._remux_to_ts(clip['tmp_mp4'], ts_path)
+        os.remove(clip['tmp_mp4'])
+
+        # Move KLV sidecar into tier folder
+        os.rename(clip['tmp_klv'], klv_path)
+
+        # JSON sidecar for human inspection
         sidecar = {
-            'session_id': self.session_id,
-            'clip_id': clip['clip_id'],
-            'tier': tier,
-            'class_name': clip['class_name'],
-            'peak_confidence': round(clip['peak_confidence'], 4),
-            'start_time': clip['start_time'],
-            'end_time': datetime.now().isoformat(),
-            'total_frames': self.frame_index - clip['start_frame'],
-            'detections': clip['detections'],
+            'session_id':       self.session_id,
+            'clip_id':          clip_id,
+            'tier':             tier,
+            'class_name':       clip['class_name'],
+            'peak_confidence':  round(clip['peak_confidence'], 4),
+            'start_time':       clip['start_time'],
+            'end_time':         datetime.now().isoformat(),
+            'total_frames':     self.frame_index - clip['start_frame'],
+            'detections':       clip['detections'],
         }
-        sidecar_path = os.path.join(tier_dir, f"{clip['clip_id']}.json")
-        with open(sidecar_path, 'w') as f:
+        with open(os.path.join(tier_dir, f'{clip_id}.json'), 'w') as f:
             json.dump(sidecar, f, indent=2)
 
-        print(f"[CLIP] Saved {tier}/{clip['clip_id']}.mp4 (peak conf: {clip['peak_confidence']:.0%})")
+        print(f"[CLIP] Saved {tier}/{clip_id}.ts (peak conf: {clip['peak_confidence']:.0%})")
+
+        if self.uploader:
+            try:
+                ts_uri, klv_uri = self.uploader.upload_clip(
+                    ts_path, klv_path, self.session_id, clip_id, tier
+                )
+                print(f"[S3]  Uploaded → {ts_uri}")
+                print(f"[S3]          → {klv_uri}")
+            except RuntimeError as e:
+                print(f"[S3]  Upload failed: {e}")
+
         self.active_clip = None
 
     def _update_clip(self, raw_frame, target_hits):
-        """Drive the clip state machine for one frame."""
         if not self.target_classes:
             return
 
@@ -249,12 +301,26 @@ class YOLONorfairTracker:
                     conf = obj.last_detection.data['confidence']
                     if conf > self.active_clip['peak_confidence']:
                         self.active_clip['peak_confidence'] = conf
+
+                    # Write KLV packet
+                    packet = klv.encode_packet(
+                        frame_id=self.frame_index,
+                        timestamp=datetime.now().isoformat(),
+                        session_id=self.session_id,
+                        clip_id=self.active_clip['clip_id'],
+                        track_id=int(obj.id),
+                        class_name=obj.last_detection.data['class_name'],
+                        confidence=float(conf),
+                        bbox=obj.last_detection.data['bbox'],
+                    )
+                    self.active_clip['klv_file'].write(packet)
+
                     self.active_clip['detections'].append({
-                        'frame_id': self.frame_index,
-                        'timestamp': datetime.now().isoformat(),
-                        'track_id': obj.id,
+                        'frame_id':   self.frame_index,
+                        'timestamp':  datetime.now().isoformat(),
+                        'track_id':   obj.id,
                         'confidence': round(float(conf), 4),
-                        'bbox': [round(float(v), 1) for v in obj.last_detection.data['bbox']],
+                        'bbox':       [round(float(v), 1) for v in obj.last_detection.data['bbox']],
                     })
                     cls = obj.last_detection.data['class_name']
                     self.object_counts.setdefault(cls, set()).add(obj.id)
@@ -268,15 +334,15 @@ class YOLONorfairTracker:
             return
         record = {
             'session_id': self.session_id,
-            'frame_id': self.frame_index,
-            'timestamp': datetime.now().isoformat(),
+            'frame_id':   self.frame_index,
+            'timestamp':  datetime.now().isoformat(),
             'detections': [
                 {
-                    'track_id': obj.id,
+                    'track_id':   obj.id,
                     'class_name': obj.last_detection.data['class_name'],
-                    'class_id': int(obj.last_detection.data['class_id']),
+                    'class_id':   int(obj.last_detection.data['class_id']),
                     'confidence': round(obj.last_detection.data['confidence'], 4),
-                    'bbox': [round(float(v), 1) for v in obj.last_detection.data['bbox']],
+                    'bbox':       [round(float(v), 1) for v in obj.last_detection.data['bbox']],
                 }
                 for obj in target_hits
             ],
@@ -299,17 +365,17 @@ class YOLONorfairTracker:
             x1, y1, x2, y2 = obj.last_detection.data['bbox']
             x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
 
-            class_name = obj.last_detection.data.get('class_name', 'unknown')
-            confidence = obj.last_detection.data.get('confidence', 0.0)
-            cls = obj.last_detection.data.get('class_id', 0)
+            class_name  = obj.last_detection.data.get('class_name', 'unknown')
+            confidence  = obj.last_detection.data.get('confidence', 0.0)
+            cls         = obj.last_detection.data.get('class_id', 0)
 
             is_selected = obj.id in self.selected_track_ids
-            is_target = class_name in self.target_classes
+            is_target   = class_name in self.target_classes
 
             if is_selected:
                 color, thickness = (0, 255, 0), 3
             elif is_target:
-                color, thickness = (0, 165, 255), 3  # orange for target class
+                color, thickness = (0, 165, 255), 3
             else:
                 color, thickness = self.colors[cls % len(self.colors)], 2
 
@@ -356,7 +422,7 @@ class YOLONorfairTracker:
             is_status = i < num_status
             color = (0, 255, 255) if is_status else (200, 200, 200)
             if clip_line is not None and i == 4 and self.active_clip:
-                color = (0, 0, 255)  # red while recording
+                color = (0, 0, 255)
             font_scale = 0.6 if is_status else 0.5
             cv2.putText(frame, text, (15, y_offset + i * 18),
                         cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 2 if is_status else 1)
@@ -375,7 +441,7 @@ class YOLONorfairTracker:
 
         fps_display = 0
         fps_counter = 0
-        start_time = time.time()
+        start_time  = time.time()
 
         try:
             while True:
@@ -384,20 +450,17 @@ class YOLONorfairTracker:
                     print("Error reading frame")
                     break
 
-                # Keep raw copy for preroll/clip recording (before annotation)
                 raw_frame = frame.copy()
 
-                results = self.model(frame, conf=self.conf_threshold, verbose=False)
-                detections = self.yolo_detections_to_norfair_detections(results)
+                results        = self.model(frame, conf=self.conf_threshold, verbose=False)
+                detections     = self.yolo_detections_to_norfair_detections(results)
                 tracked_objects = self.tracker.update(detections=detections)
 
                 target_hits = self._target_detections(tracked_objects)
 
-                # Clip recording and export (uses unannotated raw_frame)
                 self._update_clip(raw_frame, target_hits)
                 self._write_export(target_hits)
 
-                # Preroll always gets the current raw frame
                 self.preroll.append(raw_frame)
                 self.frame_index += 1
 
@@ -410,7 +473,7 @@ class YOLONorfairTracker:
                 if time.time() - start_time > 1.0:
                     fps_display = fps_counter
                     fps_counter = 0
-                    start_time = time.time()
+                    start_time  = time.time()
 
                 if self.track_all:
                     num_tracked = len([obj for obj in tracked_objects if obj.live_points.any()])
@@ -440,20 +503,27 @@ class YOLONorfairTracker:
 
             if self.session_dir:
                 summary = {
-                    'session_id': self.session_id,
-                    'start_time': self.session_start.isoformat(),
-                    'end_time': datetime.now().isoformat(),
-                    'total_frames': self.frame_index,
-                    'clips_saved': self.clip_count,
-                    'target_classes': list(self.target_classes),
-                    'hit_threshold': self.hit_threshold,
+                    'session_id':         self.session_id,
+                    'start_time':         self.session_start.isoformat(),
+                    'end_time':           datetime.now().isoformat(),
+                    'total_frames':       self.frame_index,
+                    'clips_saved':        self.clip_count,
+                    'target_classes':     list(self.target_classes),
+                    'hit_threshold':      self.hit_threshold,
                     'near_miss_threshold': self.near_miss_threshold,
-                    'object_counts': {k: len(v) for k, v in self.object_counts.items()},
+                    'object_counts':      {k: len(v) for k, v in self.object_counts.items()},
                 }
                 summary_path = os.path.join(self.session_dir, 'session_summary.json')
                 with open(summary_path, 'w') as f:
                     json.dump(summary, f, indent=2)
                 print(f"Session summary: {summary_path}")
+
+                if self.uploader:
+                    try:
+                        uri = self.uploader.upload_summary(summary_path, self.session_id)
+                        print(f"[S3]  Summary → {uri}")
+                    except RuntimeError as e:
+                        print(f"[S3]  Summary upload failed: {e}")
 
             if self.metadata_file:
                 self.metadata_file.close()
@@ -467,54 +537,23 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description='YOLOv11 + Norfair Object Tracker - Real-time multi-object tracking'
+        description='YOLOv11 + Norfair Object Tracker'
     )
     parser.add_argument(
-        '--model', type=str, default='n', choices=['n', 's', 'm', 'l', 'x'],
-        help='YOLO model size: n(nano-fastest), s(small), m(medium), l(large), x(extra-slowest but accurate)'
+        '--config', default='config.yaml',
+        help='Path to YAML config file (default: config.yaml)'
     )
-    parser.add_argument(
-        '--conf', type=float, default=0.25,
-        help='Confidence threshold for detections (0.0-1.0, default: 0.25)'
-    )
-    parser.add_argument(
-        '--selective', action='store_true',
-        help='Start in selective mode (click to track specific objects)'
-    )
-    parser.add_argument(
-        '--target-class', nargs='+', metavar='CLASS', dest='target_classes',
-        help='Class name(s) to trigger clip recording (e.g. --target-class person car)'
-    )
-    parser.add_argument(
-        '--hit-threshold', type=float, default=0.80,
-        help='Confidence >= this is saved as a "hit" clip (default: 0.80)'
-    )
-    parser.add_argument(
-        '--near-miss-threshold', type=float, default=0.30,
-        help='Confidence >= this triggers recording; below hit-threshold = "near_miss" (default: 0.30)'
-    )
-    parser.add_argument(
-        '--export', action='store_true',
-        help='Write per-frame detection metadata to detections.jsonl'
-    )
-    parser.add_argument(
-        '--output-dir', type=str, default='./sessions',
-        help='Root directory for session output (default: ./sessions)'
-    )
-
     args = parser.parse_args()
 
+    if not os.path.exists(args.config):
+        print(f"Error: config file not found: {args.config}")
+        print("Copy config.example.yaml to config.yaml and edit it.")
+        sys.exit(1)
+
+    config = load_config(args.config)
+
     try:
-        tracker_app = YOLONorfairTracker(
-            model_size=args.model,
-            conf_threshold=args.conf,
-            track_all=not args.selective,
-            target_classes=args.target_classes,
-            hit_threshold=args.hit_threshold,
-            near_miss_threshold=args.near_miss_threshold,
-            export=args.export,
-            output_dir=args.output_dir,
-        )
+        tracker_app = YOLONorfairTracker(config)
         tracker_app.run()
     except KeyboardInterrupt:
         print("\n\nInterrupted by user")

@@ -1,0 +1,20 @@
+model:
+  size: n                  # n | s | m | l | x  (nano → extra-large)
+  conf_threshold: 0.25     # minimum detection confidence (0.0–1.0)
+
+tracking:
+  mode: all                # all | selective
+
+capture:
+  target_classes:          # COCO class names to trigger clip recording
+    - person
+  hit_threshold: 0.80      # confidence >= this → saved under hits/
+  near_miss_threshold: 0.30  # confidence >= this → saved under near_misses/; below → ignored
+  export: true             # write per-frame detections.jsonl alongside clips
+  output_dir: ./sessions
+
+upload:
+  enabled: false
+  s3_bucket: your-bucket-name
+  s3_prefix: captures      # S3 key prefix; leave empty for bucket root
+  region: us-east-1        # AWS region; omit to use AWS_DEFAULT_REGION env var
