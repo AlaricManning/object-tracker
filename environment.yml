@@ -1,0 +1,15 @@
+name: object-tracker
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - ffmpeg
+  - pip
+  - pip:
+      - opencv-python>=4.8.0
+      - numpy>=1.24.0
+      - ultralytics>=8.0.0
+      - norfair>=2.2.0
+      - boto3>=1.26.0
+      - pyyaml>=6.0.0

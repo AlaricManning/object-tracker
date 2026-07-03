@@ -33,20 +33,22 @@ The tracker can detect and track 80 different object classes from the COCO datas
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- [Miniforge](https://github.com/conda-forge/miniforge) or Conda
 - Webcam connected to your computer
 - (Optional) NVIDIA GPU with CUDA for faster performance
+- AWS account + S3 bucket (only required for cloud upload)
 
 ### Setup
 
-1. Navigate to the project directory:
+1. Create and activate the conda environment (installs Python, FFmpeg, and all dependencies):
 ```bash
-cd object-tracker
+conda env create -f environment.yml
+conda activate object-tracker
 ```
 
-2. Install dependencies:
+2. Copy the example config and edit it for your setup:
 ```bash
-pip install -r requirements.txt
+cp config.example.yaml config.yaml
 ```
 
 3. **First Run**: The first time you run the tracker, it will automatically download the YOLOv11 model (~6-50 MB depending on model size). This only happens once.
@@ -57,72 +59,44 @@ That's it! You're ready to track objects.
 
 ### Basic Usage
 
-Run with default settings (YOLOv11-nano model, track all objects):
+All configuration is done via `config.yaml`. Run with:
 ```bash
 python tracker.py
 ```
 
-### Advanced Options
-
-**Choose Model Size** (affects speed vs accuracy):
+Point at a different config file:
 ```bash
-# Fastest (best for CPU, lower accuracy)
-python tracker.py --model n
-
-# Balanced (good for most cases)
-python tracker.py --model s
-
-# Medium (good GPU performance)
-python tracker.py --model m
-
-# High accuracy (requires good GPU)
-python tracker.py --model l
-
-# Maximum accuracy (requires powerful GPU)
-python tracker.py --model x
+python tracker.py --config /path/to/other-config.yaml
 ```
 
-**Adjust Confidence Threshold**:
-```bash
-# Only show very confident detections (fewer false positives)
-python tracker.py --conf 0.5
+### Configuration
 
-# Show more detections (may include some false positives)
-python tracker.py --conf 0.2
+Edit `config.yaml` to control all behaviour:
+
+```yaml
+model:
+  size: n                    # n | s | m | l | x
+  conf_threshold: 0.25
+
+tracking:
+  mode: all                  # all | selective
+
+capture:
+  target_classes:
+    - person                 # COCO class names to trigger recording
+  hit_threshold: 0.80        # confidence >= this → hits/
+  near_miss_threshold: 0.30  # confidence >= this → near_misses/
+  export: true               # write detections.jsonl
+  output_dir: ./sessions
+
+upload:
+  enabled: false
+  s3_bucket: your-bucket-name
+  s3_prefix: captures
+  region: us-east-1
 ```
 
-**Start in Selective Mode** (only track clicked objects):
-```bash
-python tracker.py --selective
-```
-
-**Record clips when a target class is detected**:
-```bash
-# Save clips to sessions/ whenever a person is detected
-python tracker.py --target-class person
-
-# Multiple target classes
-python tracker.py --target-class person car
-
-# Custom confidence thresholds (hit = clear detection, near-miss = uncertain)
-python tracker.py --target-class person --hit-threshold 0.80 --near-miss-threshold 0.30
-```
-
-**Export per-frame detection metadata to JSON Lines**:
-```bash
-python tracker.py --target-class person --export
-```
-
-**Custom output directory**:
-```bash
-python tracker.py --target-class person --export --output-dir /data/captures
-```
-
-**Combine Options**:
-```bash
-# Small model, selective mode, recording persons with export
-python tracker.py --model s --selective --target-class person --hit-threshold 0.75 --export
-```
+See `config.example.yaml` for the full annotated reference.
 
 ## Controls
 
@@ -190,14 +164,14 @@ Compared to the old OpenCV trackers (KCF, CSRT, etc.):
 ## Tips for Best Results
 
 ### Performance Optimization
-1. **Choose the right model**:
-   - CPU users: Use `--model n` (nano)
-   - GPU users: Use `--model s` or `--model m`
-   - Powerful GPU: Try `--model l`
+1. **Choose the right model** (set `model.size` in `config.yaml`):
+   - CPU users: `n` (nano)
+   - GPU users: `s` or `m`
+   - Powerful GPU: `l`
 
-2. **Adjust confidence threshold**:
-   - Too many false detections? Increase: `--conf 0.4`
-   - Missing objects? Decrease: `--conf 0.2`
+2. **Adjust confidence threshold** (set `model.conf_threshold`):
+   - Too many false detections? Increase to `0.4`
+   - Missing objects? Decrease to `0.2`
 
 3. **GPU Acceleration**:
    - Install PyTorch with CUDA support for massive speedup
@@ -252,9 +226,9 @@ Each tracked object shows:
 
 ### Low FPS / Slow Performance
 **Solutions**:
-1. Use smaller model: `python tracker.py --model n`
-2. Increase confidence threshold: `python tracker.py --conf 0.4` (fewer detections = faster)
-3. Lower webcam resolution: modify lines 51-52 in `tracker.py`
+1. Use smaller model: set `model.size: n` in `config.yaml`
+2. Increase confidence threshold: set `model.conf_threshold: 0.4` (fewer detections = faster)
+3. Lower webcam resolution: modify `cap.set` calls in `tracker.py`
 4. Close other applications
 5. Install PyTorch with GPU support (10-20x speedup)
 
@@ -305,6 +279,9 @@ pip install torch torchvision
 - **Ultralytics**: YOLOv11 object detection
 - **Norfair**: Multi-object tracking algorithms
 - **PyTorch**: Deep learning backend (auto-installed with ultralytics)
+- **FFmpeg**: MPEG-TS transcoding on clip close (installed via conda)
+- **boto3**: AWS S3 upload
+- **PyYAML**: Config file parsing
 
 ### Architecture
 ```
@@ -315,17 +292,23 @@ Webcam → Frame → YOLOv11 Detection → Norfair Tracking → Display
                   Confidence scores    Occlusion handling
                                              ↓
                                     Target class filter
-                                    (--target-class)
+                                    (config.yaml)
                                              ↓
                               ┌──────────────┴──────────────┐
                          Clip recording               Metadata export
                     (pre/post-roll buffer)          (detections.jsonl)
+                         MP4 → H.264 MPEG-TS
+                         KLV binary sidecar
                               ↓
                    sessions/{session_id}/
-                     hits/          near_misses/
-                   clip_N.mp4      clip_N.mp4
-                   clip_N.json     clip_N.json
+                     hits/              near_misses/
+                   clip_N.ts           clip_N.ts
+                   clip_N.klv          clip_N.klv
+                   clip_N.json         clip_N.json
                    session_summary.json
+                              ↓
+                         AWS S3 upload
+                    (if upload.enabled in config)
 ```
 
 ### YOLO Models
@@ -346,18 +329,25 @@ Webcam → Frame → YOLOv11 Detection → Norfair Tracking → Display
 
 ```
 object-tracker/
-├── tracker.py          # Main application (YOLOv11 + Norfair)
-├── requirements.txt    # Python dependencies
-├── README.md           # This file
-└── sessions/           # Created automatically when --target-class is used
+├── tracker.py              # Main application (YOLOv11 + Norfair + capture)
+├── klv.py                  # KLV binary metadata encoder/decoder
+├── uploader.py             # AWS S3 upload client
+├── config.yaml             # Local config (gitignored — edit this)
+├── config.example.yaml     # Committed config template
+├── environment.yml         # Conda environment (Python + FFmpeg + pip deps)
+├── requirements.txt        # Pip dependencies
+├── README.md               # This file
+└── sessions/               # Created automatically when target_classes is set
     └── {session_id}/
-        ├── hits/           # Clips where peak confidence >= hit-threshold
-        │   ├── clip_0001.mp4
-        │   └── clip_0001.json  # Sidecar: peak conf, timestamps, detections
-        ├── near_misses/    # Clips where confidence is between thresholds
-        │   ├── clip_0002.mp4
+        ├── hits/               # Clips where peak confidence >= hit_threshold
+        │   ├── clip_0001.ts    # H.264 video in MPEG-TS container
+        │   ├── clip_0001.klv   # Binary KLV detection metadata
+        │   └── clip_0001.json  # Human-readable sidecar
+        ├── near_misses/        # Clips where confidence is between thresholds
+        │   ├── clip_0002.ts
+        │   ├── clip_0002.klv
         │   └── clip_0002.json
-        ├── detections.jsonl    # Per-frame metadata (if --export is set)
+        ├── detections.jsonl    # Per-frame metadata stream (if export: true)
         └── session_summary.json
 ```
 
@@ -377,12 +367,13 @@ Tested on different hardware configurations:
 ## Future Enhancements
 
 Possible improvements for future versions:
+- ETL layer: unpack KLV from S3, write detection records to Parquet catalog
+- Querying: Athena / DuckDB over Parquet for analytics ("show all near-miss clips from last week")
+- Labeling workflow: pull near-miss clips into CVAT / Label Studio for human review
+- True MISB ST 0601 KLV: embed metadata as a PID inside the MPEG-TS stream
 - Custom object classes with fine-tuned models
 - Multiple camera support
-- Heatmap visualization
-- Path history visualization
-- Storage upload (MinIO / S3 / Azure Blob) for captured sessions
-- Labeling workflow integration (CVAT / Label Studio) for near-miss clips
+- Heatmap and path history visualization
 
 ## Comparison: Classical vs Deep Learning Tracking
 
@@ -421,39 +412,66 @@ This project is provided as-is for personal and educational use.
 
 ## Quick Start Examples
 
-### Example 1: Track People
+### Example 1: Basic tracking (no recording)
+```yaml
+# config.yaml
+model:
+  size: n
+  conf_threshold: 0.25
+tracking:
+  mode: all
+capture:
+  target_classes: []
+```
 ```bash
-python tracker.py --model s --conf 0.3
-# Press M to switch to selective mode, then click on people to track
+python tracker.py
 ```
 
-### Example 2: High Performance Mode
+### Example 2: Record person clips with metadata export
+```yaml
+# config.yaml
+capture:
+  target_classes: [person]
+  hit_threshold: 0.70
+  near_miss_threshold: 0.30
+  export: true
+  output_dir: ./sessions
+```
 ```bash
-python tracker.py --model n --conf 0.4
-# Fast tracking with fewer false positives
+python tracker.py
+# Clips land in sessions/{timestamp}/hits/ and near_misses/
 ```
 
-### Example 3: Maximum Accuracy (GPU Required)
+### Example 3: Edge capture with S3 upload
+```yaml
+# config.yaml
+model:
+  size: s
+capture:
+  target_classes: [person, car]
+  hit_threshold: 0.80
+  near_miss_threshold: 0.35
+  export: true
+  output_dir: /data/captures
+upload:
+  enabled: true
+  s3_bucket: your-bucket-name
+  s3_prefix: captures
+  region: us-east-1
+```
 ```bash
-python tracker.py --model l --conf 0.35
-# Best detection quality
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+python tracker.py
 ```
 
-### Example 4: Focus on Specific Objects
-```bash
-python tracker.py --selective
-# Only tracks what you click on
+### Example 4: Selective mode (click to track)
+```yaml
+# config.yaml
+tracking:
+  mode: selective
 ```
-
-### Example 5: Record Person Clips with Metadata
 ```bash
-python tracker.py --target-class person --hit-threshold 0.70 --near-miss-threshold 0.30 --export
-# Saves clips to sessions/{timestamp}/hits/ and near_misses/
-# Writes per-frame detections to sessions/{timestamp}/detections.jsonl
-```
-
-### Example 6: Edge Capture for Pipeline Ingestion
-```bash
-python tracker.py --model s --target-class person car --hit-threshold 0.80 --near-miss-threshold 0.35 --export --output-dir /data/captures
-# Production-style capture: clips + metadata ready for storage upload
+python tracker.py
+# Click on any detected object to track it; click again to untrack
 ```
