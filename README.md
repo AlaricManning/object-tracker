@@ -271,6 +271,54 @@ pip install -r requirements.txt
 pip install torch torchvision
 ```
 
+## Testing
+
+The test suite covers all modules that can run without a webcam or GPU — KLV encoding, S3 key construction, drawing logic, and tracker helper methods. No real AWS calls are made (boto3 is mocked).
+
+### Running the tests
+
+```bash
+conda run -n object-tracker pytest -v
+```
+
+67 tests, ~1.5s:
+
+```
+tests/test_display.py::test_draw_empty_list_does_not_crash PASSED
+tests/test_display.py::test_draw_selective_skips_unselected PASSED
+...
+tests/test_klv.py::test_round_trip_session_id PASSED
+tests/test_klv.py::test_round_trip_bbox PASSED
+tests/test_klv.py::test_truncated_payload_raises PASSED
+...
+tests/test_uploader.py::test_upload_clip_ts_key PASSED
+tests/test_uploader.py::test_upload_clip_wraps_botocore_error PASSED
+...
+tests/test_tracker.py::test_target_detections_filters_low_confidence PASSED
+tests/test_tracker.py::test_click_selects_object PASSED
+...
+67 passed in 1.41s
+```
+
+With coverage report:
+
+```bash
+conda run -n object-tracker pytest --cov=. --cov-report=term-missing
+```
+
+### What's tested
+
+| File | Tests | What's covered |
+|------|-------|----------------|
+| `test_klv.py` | 24 | Wire format, all-field encode/decode round-trips, multi-packet streaming via `iter_packets`, error cases (truncated header, truncated payload, oversized value) |
+| `test_uploader.py` | 16 | S3 key construction with/without prefix, correct `.ts` and `.klv` keys per tier, URI return values, `BotoCoreError` and `ClientError` both wrapped as `RuntimeError` |
+| `test_display.py` | 11 | Track-all vs selective filtering, target-class colour logic, active-clip HUD rendering, graceful skip when `last_detection` is `None` |
+| `test_tracker.py` | 16 | `load_config` YAML parsing, `_target_detections` class and confidence filtering, `check_click_on_object` select/deselect/miss — `__init__` patched out so no webcam or model needed |
+
+### What's not tested (intentionally)
+
+The main capture loop (`run()`), webcam initialisation, YOLO inference, Norfair tracking, FFmpeg transcoding, and actual S3 uploads all require hardware or real external services. These are validated by running the tracker end-to-end against the webcam and checking the S3 bucket directly.
+
 ## Technical Details
 
 ### Dependencies
