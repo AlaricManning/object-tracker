@@ -342,22 +342,31 @@ Webcam → Frame → YOLOv11 Detection → Norfair Tracking → Display
                                     Target class filter
                                     (config.yaml)
                                              ↓
-                              ┌──────────────┴──────────────┐
-                         Clip recording               Metadata export
-                    (pre/post-roll buffer)          (detections.jsonl)
-                         MP4 → H.264 MPEG-TS
-                         KLV binary sidecar
-                              ↓
-                   sessions/{session_id}/
-                     hits/              near_misses/
-                   clip_N.ts           clip_N.ts
-                   clip_N.klv          clip_N.klv
-                   clip_N.json         clip_N.json
-                   session_summary.json
-                              ↓
-                         AWS S3 upload
-                    (if upload.enabled in config)
+                   ┌─────────────────────────┴──────────────────────────┐
+             Clip recording                                  Local debug export
+        (pre/post-roll buffer)                              detections.jsonl
+         MP4 → H.264 MPEG-TS                         all target detections for
+         + KLV binary sidecar                        the session, including ones
+         + JSON human-readable sidecar               between clips — local only,
+                   ↓                                       not uploaded to S3
+        sessions/{session_id}/
+          hits/clip_N.ts          ← video
+          hits/clip_N.klv         ← binary detection metadata (uploaded to S3)
+          hits/clip_N.json        ← human-readable copy of KLV — local only
+          near_misses/  (same structure)
+          session_summary.json    ← session stats (uploaded to S3)
+          detections.jsonl        ← local only (see above)
+                   ↓
+           AWS S3 upload          (if upload.enabled in config)
+      raw/{session_id}/hits/
+        clip_N.ts                 ✓ video
+        clip_N.klv                ✓ per-detection metadata (track ID, class,
+                                    confidence, bbox, timestamp per frame)
+      raw/{session_id}/
+        session_summary.json      ✓ session-level stats
 ```
+
+The KLV file is the source of truth for detection metadata in S3. The pipeline repo reads KLV from `raw/` and unpacks it into a Parquet catalog for querying. The JSON sidecar serves the same data locally in human-readable form but is not part of the pipeline.
 
 ### YOLO Models
 - **Framework**: Ultralytics YOLOv11 (latest version)
