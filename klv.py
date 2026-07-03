@@ -32,6 +32,12 @@ _TAG_NAMES = {
     TAG_BBOX_Y2:    ('y2',          '>f'),
 }
 _TAG_STRINGS = {TAG_TIMESTAMP, TAG_CLASS_NAME, TAG_SESSION_ID, TAG_CLIP_ID}
+_TAG_STRING_NAMES = {
+    TAG_TIMESTAMP:  'timestamp',
+    TAG_CLASS_NAME: 'class_name',
+    TAG_SESSION_ID: 'session_id',
+    TAG_CLIP_ID:    'clip_id',
+}
 
 
 def _triplet(tag: int, value: bytes) -> bytes:
@@ -94,9 +100,7 @@ def decode_packet(data: bytes, offset: int = 0) -> tuple[dict, int]:
             name, fmt = _TAG_NAMES[tag]
             fields[name] = round(struct.unpack(fmt, value)[0], 4)
         elif tag in _TAG_STRINGS:
-            name = {TAG_TIMESTAMP: 'timestamp', TAG_CLASS_NAME: 'class_name',
-                    TAG_SESSION_ID: 'session_id', TAG_CLIP_ID: 'clip_id'}[tag]
-            fields[name] = value.decode()
+            fields[_TAG_STRING_NAMES[tag]] = value.decode()
 
     return fields, end
 
