@@ -195,7 +195,7 @@ Compared to the old OpenCV trackers (KCF, CSRT, etc.):
 ### Bounding Box Colors
 - **Different colors** = Different object classes
 - **Green (thick)** = Selected/pinned object (in selective mode)
-- **Orange (thick)** = Target class object (when `--target-class` is set)
+- **Orange (thick)** = Target class object (when `capture.target_classes` is set in config)
 - **Colored (normal)** = Tracked object (in track-all mode)
 
 ### Labels
@@ -212,7 +212,7 @@ Each tracked object shows:
 - **Detections**: Number of objects detected in current frame
 - **Tracked**: Number of objects being tracked
 - **Selected**: Number of manually selected objects (selective mode)
-- **REC / Clips saved**: Shown when `--target-class` is set; turns red while a clip is actively recording, showing the clip ID and current peak confidence
+- **REC / Clips saved**: Shown when `capture.target_classes` is set in config; turns red while a clip is actively recording, showing the clip ID and current peak confidence
 
 ## Troubleshooting
 
@@ -250,9 +250,9 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 ### Objects Not Being Detected
 **Solutions**:
-1. Lower confidence threshold: `--conf 0.2`
+1. Lower confidence threshold: set `model.conf_threshold: 0.2` in `config.yaml`
 2. Improve lighting conditions
-3. Use larger model for better accuracy: `--model s` or `--model m`
+3. Use larger model for better accuracy: set `model.size: s` or `model.size: m` in `config.yaml`
 4. Check if object class is in COCO dataset (80 classes supported)
 5. Make sure objects are clearly visible and not too small
 
@@ -329,7 +329,8 @@ Webcam → Frame → YOLOv11 Detection → Norfair Tracking → Display
 
 ```
 object-tracker/
-├── tracker.py              # Main application (YOLOv11 + Norfair + capture)
+├── tracker.py              # Main application (YOLOv11 + Norfair + capture loop)
+├── display.py              # HUD drawing functions (bounding boxes, info panel)
 ├── klv.py                  # KLV binary metadata encoder/decoder
 ├── uploader.py             # AWS S3 upload client
 ├── config.yaml             # Local config (gitignored — edit this)
@@ -460,10 +461,26 @@ upload:
   region: us-east-1
 ```
 ```bash
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-python tracker.py
+# Using an AWS named profile (recommended):
+AWS_PROFILE=your-profile python tracker.py
+
+# Or with environment variables:
+# AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... python tracker.py
 ```
+
+Verify the upload landed correctly:
+```bash
+aws s3 ls s3://your-bucket-name/raw/ --recursive
+```
+```
+2026-07-03 10:01:44      15456 raw/2026-07-03T10-01-31/hits/clip_0001.klv
+2026-07-03 10:01:43    1389884 raw/2026-07-03T10-01-31/hits/clip_0001.ts
+2026-07-03 10:01:55      14560 raw/2026-07-03T10-01-31/hits/clip_0002.klv
+2026-07-03 10:01:55    1298140 raw/2026-07-03T10-01-31/hits/clip_0002.ts
+2026-07-03 10:01:55        310 raw/2026-07-03T10-01-31/session_summary.json
+```
+
+Each session lands under `raw/{session_id}/`, with `.ts` video and `.klv` sidecar always uploaded as a pair, linked by `clip_id`. The `session_summary.json` covers the full session.
 
 ### Example 4: Selective mode (click to track)
 ```yaml
