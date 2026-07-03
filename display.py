@@ -4,7 +4,7 @@ import numpy as np
 
 def draw_tracked_objects(frame, tracked_objects, track_all, selected_track_ids, target_classes, colors):
     for obj in tracked_objects:
-        if not hasattr(obj, 'last_detection') or obj.last_detection.points is None:
+        if not hasattr(obj, 'last_detection') or obj.last_detection is None or obj.last_detection.points is None:
             continue
         if not track_all and obj.id not in selected_track_ids:
             continue
