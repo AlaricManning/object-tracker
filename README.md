@@ -468,6 +468,20 @@ AWS_PROFILE=your-profile python tracker.py
 # AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... python tracker.py
 ```
 
+Verify the upload landed correctly:
+```bash
+aws s3 ls s3://your-bucket-name/raw/ --recursive
+```
+```
+2026-07-03 10:01:44      15456 raw/2026-07-03T10-01-31/hits/clip_0001.klv
+2026-07-03 10:01:43    1389884 raw/2026-07-03T10-01-31/hits/clip_0001.ts
+2026-07-03 10:01:55      14560 raw/2026-07-03T10-01-31/hits/clip_0002.klv
+2026-07-03 10:01:55    1298140 raw/2026-07-03T10-01-31/hits/clip_0002.ts
+2026-07-03 10:01:55        310 raw/2026-07-03T10-01-31/session_summary.json
+```
+
+Each session lands under `raw/{session_id}/`, with `.ts` video and `.klv` sidecar always uploaded as a pair, linked by `clip_id`. The `session_summary.json` covers the full session.
+
 ### Example 4: Selective mode (click to track)
 ```yaml
 # config.yaml
