@@ -11,8 +11,10 @@
 .DS_Store
 Thumbs.db
 
-# Session capture output — exclude video, keep metadata as examples
+# Session capture output — exclude video and binary metadata, keep JSON as examples
 sessions/**/*.mp4
+sessions/**/*.ts
+sessions/**/*.klv
 *.pt
 
 # Local config (use config.example.yaml as the committed template)

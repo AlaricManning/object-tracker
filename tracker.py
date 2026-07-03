@@ -230,11 +230,13 @@ class YOLONorfairTracker:
 
     def _remux_to_ts(self, mp4_path: str, ts_path: str):
         result = subprocess.run(
-            ['ffmpeg', '-y', '-i', mp4_path, '-c', 'copy', '-f', 'mpegts', ts_path],
+            ['ffmpeg', '-y', '-i', mp4_path,
+             '-vcodec', 'libx264', '-crf', '23', '-preset', 'fast',
+             '-f', 'mpegts', ts_path],
             capture_output=True,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"FFmpeg remux failed:\n{result.stderr.decode()}")
+            raise RuntimeError(f"FFmpeg transcode failed:\n{result.stderr.decode()}")
 
     def _close_clip(self):
         clip = self.active_clip
