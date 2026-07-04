@@ -18,3 +18,4 @@ upload:
   s3_bucket: your-bucket-name
   s3_prefix: captures      # S3 key prefix; leave empty for bucket root
   region: us-east-1        # AWS region; omit to use AWS_DEFAULT_REGION env var
+  delete_local_after_upload: false  # delete local .ts/.klv once S3 upload is confirmed

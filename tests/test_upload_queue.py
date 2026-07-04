@@ -59,6 +59,42 @@ def test_get_pending_returns_clip_fields(queue):
     assert item['klv_path']   == '/tmp/clip.klv'
 
 
+def test_mp4_path_round_trips(queue):
+    queue.enqueue_clip(**CLIP, mp4_path='/tmp/_clip_0001_tmp.mp4')
+    assert queue.get_pending()[0]['mp4_path'] == '/tmp/_clip_0001_tmp.mp4'
+
+
+def test_mp4_path_defaults_to_none(queue):
+    queue.enqueue_clip(**CLIP)
+    assert queue.get_pending()[0]['mp4_path'] is None
+
+
+def test_migrates_db_without_mp4_path_column(tmp_path):
+    # DBs created before the transcode stage moved into the worker
+    import sqlite3
+    db = str(tmp_path / 'upload_queue.db')
+    with sqlite3.connect(db) as conn:
+        conn.execute('''
+            CREATE TABLE uploads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL, session_id TEXT NOT NULL,
+                clip_id TEXT, tier TEXT, ts_path TEXT, klv_path TEXT,
+                local_path TEXT, status TEXT DEFAULT 'pending',
+                attempts INTEGER DEFAULT 0, next_retry_at TEXT,
+                error TEXT, created_at TEXT NOT NULL
+            )
+        ''')
+        conn.execute(
+            "INSERT INTO uploads (type, session_id, clip_id, tier, ts_path, klv_path, created_at) "
+            "VALUES ('clip', 'old-sess', 'clip_0001', 'hits', '/tmp/c.ts', '/tmp/c.klv', ?)",
+            (datetime.now().isoformat(),),
+        )
+    q = UploadQueue(db)
+    item = q.get_pending()[0]
+    assert item['clip_id'] == 'clip_0001'
+    assert item['mp4_path'] is None
+
+
 def test_get_pending_returns_summary_fields(queue):
     queue.enqueue_summary(**SUMMARY)
     item = queue.get_pending()[0]
@@ -178,3 +214,64 @@ def test_done_persists_across_instances(tmp_path):
 
     q2 = UploadQueue(db)
     assert q2.pending_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Retention: failed_items + purge_done
+# ---------------------------------------------------------------------------
+
+def exhaust_attempts(queue, item_id):
+    for _ in range(MAX_ATTEMPTS):
+        queue.mark_failed(item_id, 'persistent error')
+
+
+def test_failed_items_reports_exhausted(queue):
+    queue.enqueue_clip(**CLIP)
+    exhaust_attempts(queue, queue.get_pending()[0]['id'])
+    failed = queue.failed_items()
+    assert len(failed) == 1
+    assert failed[0]['clip_id'] == 'clip_0001'
+    assert failed[0]['error'] == 'persistent error'
+
+
+def test_failed_items_excludes_retryable(queue):
+    queue.enqueue_clip(**CLIP)
+    queue.mark_failed(queue.get_pending()[0]['id'], 'one failure')
+    assert queue.failed_items() == []
+
+
+def test_failed_items_excludes_done(queue):
+    queue.enqueue_clip(**CLIP)
+    queue.mark_done(queue.get_pending()[0]['id'])
+    assert queue.failed_items() == []
+
+
+def test_purge_done_removes_old_rows(queue):
+    queue.enqueue_clip(**CLIP)
+    item_id = queue.get_pending()[0]['id']
+    queue.mark_done(item_id)
+    # Backdate the row past the cutoff
+    with queue._conn() as conn:
+        conn.execute('UPDATE uploads SET created_at = ? WHERE id = ?',
+                     ('2020-01-01T00:00:00', item_id))
+    assert queue.purge_done(older_than_days=7) == 1
+    with queue._conn() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM uploads').fetchone()[0] == 0
+
+
+def test_purge_done_keeps_recent_rows(queue):
+    queue.enqueue_clip(**CLIP)
+    queue.mark_done(queue.get_pending()[0]['id'])
+    assert queue.purge_done(older_than_days=7) == 0
+
+
+def test_purge_done_never_touches_pending_or_failed(queue):
+    queue.enqueue_clip(**CLIP)                                  # stays pending
+    queue.enqueue_clip(**{**CLIP, 'clip_id': 'clip_0002'})      # will exhaust
+    items = queue.get_pending()
+    exhaust_attempts(queue, items[1]['id'])
+    with queue._conn() as conn:
+        conn.execute("UPDATE uploads SET created_at = '2020-01-01T00:00:00'")
+    assert queue.purge_done(older_than_days=7) == 0
+    assert queue.pending_count() == 1
+    assert len(queue.failed_items()) == 1

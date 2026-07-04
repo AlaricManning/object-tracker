@@ -96,6 +96,7 @@ upload:
   s3_bucket: your-bucket-name
   s3_prefix: captures
   region: us-east-1
+  delete_local_after_upload: false  # free disk once S3 confirms the upload
 ```
 
 See `config.example.yaml` for the full annotated reference.
@@ -351,7 +352,7 @@ Webcam → Frame → YOLOv11 Detection → Norfair Tracking → Display
                    ┌─────────────────────────┴──────────────────────────┐
              Clip recording                                  Local debug export
         (pre/post-roll buffer)                              detections.jsonl
-         MP4 → H.264 MPEG-TS                         all target detections for
+         temp MP4 while recording                    all target detections for
          + KLV binary sidecar                        the session, including ones
          + JSON human-readable sidecar               between clips — local only,
                    ↓                                       not uploaded to S3
@@ -366,9 +367,9 @@ Webcam → Frame → YOLOv11 Detection → Norfair Tracking → Display
                    ↓
         Store-and-forward queue   (upload_queue.py + upload_worker.py)
           • enqueued instantly on clip close — recording never blocks
-          • background thread uploads asynchronously
+          • background thread transcodes MP4 → H.264 MPEG-TS, then uploads
           • exponential backoff on failure (5s → 300s cap, 10 attempts)
-          • survives crashes — retried automatically on next run
+          • survives crashes — resumes transcode/upload on next run
                    ↓
            AWS S3 upload          (if upload.enabled in config)
       raw/{session_id}/hits/

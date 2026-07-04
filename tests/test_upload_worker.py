@@ -3,7 +3,7 @@ Tests for upload_worker.py — verifies the worker drains the queue correctly.
 UploadQueue uses a real SQLite DB (tmp_path); S3Uploader is mocked.
 """
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from upload_queue import UploadQueue
 from upload_worker import UploadWorker
 
@@ -116,3 +116,124 @@ def test_empty_queue_stop_does_not_hang(queue, uploader):
     worker = make_worker(queue, uploader)
     worker.start()
     worker.stop(timeout=5)  # nothing to drain, should return quickly
+
+
+# ---------------------------------------------------------------------------
+# Transcode stage (_finish_clip)
+# ---------------------------------------------------------------------------
+
+def enqueue_transcode_clip(queue, tmp_path, ts_exists=False, mp4_exists=True):
+    """Enqueue a clip whose mp4/ts live in tmp_path; returns (mp4, ts) paths."""
+    mp4 = tmp_path / '_clip_0001_tmp.mp4'
+    ts  = tmp_path / 'hits' / 'clip_0001.ts'
+    ts.parent.mkdir(exist_ok=True)
+    if mp4_exists:
+        mp4.write_bytes(b'fake mp4')
+    if ts_exists:
+        ts.write_bytes(b'fake ts')
+    queue.enqueue_clip(session_id='sess-1', clip_id='clip_0001', tier='hits',
+                       ts_path=str(ts), klv_path='/tmp/clip.klv', mp4_path=str(mp4))
+    return mp4, ts
+
+
+def test_worker_transcodes_before_upload(queue, uploader, tmp_path):
+    mp4, ts = enqueue_transcode_clip(queue, tmp_path)
+    with patch('upload_worker.transcode_to_ts') as transcode:
+        transcode.side_effect = lambda m, t: open(t, 'wb').write(b'ts data')
+        make_worker(queue, uploader)._process_pending()
+    transcode.assert_called_once_with(str(mp4), str(ts))
+    uploader.upload_clip.assert_called_once()
+    assert queue.pending_count() == 0
+
+
+def test_worker_deletes_mp4_after_transcode(queue, uploader, tmp_path):
+    mp4, ts = enqueue_transcode_clip(queue, tmp_path)
+    with patch('upload_worker.transcode_to_ts') as transcode:
+        transcode.side_effect = lambda m, t: open(t, 'wb').write(b'ts data')
+        make_worker(queue, uploader)._process_pending()
+    assert not mp4.exists()
+    assert ts.exists()
+
+
+def test_worker_skips_transcode_when_ts_exists(queue, uploader, tmp_path):
+    # Resume case: crashed after transcode, before upload
+    mp4, ts = enqueue_transcode_clip(queue, tmp_path, ts_exists=True)
+    with patch('upload_worker.transcode_to_ts') as transcode:
+        make_worker(queue, uploader)._process_pending()
+    transcode.assert_not_called()
+    assert not mp4.exists()  # leftover mp4 still cleaned up
+    uploader.upload_clip.assert_called_once()
+
+
+def test_worker_transcodes_without_uploader(queue, tmp_path):
+    # upload disabled — clip must still be transcoded and marked done
+    mp4, ts = enqueue_transcode_clip(queue, tmp_path)
+    with patch('upload_worker.transcode_to_ts') as transcode:
+        transcode.side_effect = lambda m, t: open(t, 'wb').write(b'ts data')
+        make_worker(queue, None)._process_pending()
+    transcode.assert_called_once()
+    assert queue.pending_count() == 0
+
+
+def test_worker_transcode_failure_retries(queue, uploader, tmp_path):
+    mp4, ts = enqueue_transcode_clip(queue, tmp_path)
+    with patch('upload_worker.transcode_to_ts') as transcode:
+        transcode.side_effect = RuntimeError('FFmpeg transcode failed')
+        make_worker(queue, uploader)._process_pending()
+    uploader.upload_clip.assert_not_called()
+    assert mp4.exists()          # source kept for the retry
+    assert queue.pending_count() == 1
+
+
+def test_worker_summary_skipped_without_uploader(queue):
+    queue.enqueue_summary(**SUMMARY)
+    make_worker(queue, None)._process_pending()
+    assert queue.pending_count() == 0  # marked done, nothing to upload
+
+
+# ---------------------------------------------------------------------------
+# delete_local_after_upload
+# ---------------------------------------------------------------------------
+
+def test_delete_local_removes_files_after_upload(queue, uploader, tmp_path):
+    ts  = tmp_path / 'clip_0001.ts'
+    kv  = tmp_path / 'clip_0001.klv'
+    ts.write_bytes(b'ts')
+    kv.write_bytes(b'klv')
+    queue.enqueue_clip(session_id='sess-1', clip_id='clip_0001', tier='hits',
+                       ts_path=str(ts), klv_path=str(kv))
+    UploadWorker(queue, uploader, delete_local=True)._process_pending()
+    assert not ts.exists()
+    assert not kv.exists()
+    assert queue.pending_count() == 0
+
+
+def test_delete_local_keeps_files_when_upload_fails(queue, uploader, tmp_path):
+    ts = tmp_path / 'clip_0001.ts'
+    kv = tmp_path / 'clip_0001.klv'
+    ts.write_bytes(b'ts')
+    kv.write_bytes(b'klv')
+    uploader.upload_clip.side_effect = RuntimeError('network down')
+    queue.enqueue_clip(session_id='sess-1', clip_id='clip_0001', tier='hits',
+                       ts_path=str(ts), klv_path=str(kv))
+    UploadWorker(queue, uploader, delete_local=True)._process_pending()
+    assert ts.exists()
+    assert kv.exists()
+
+
+def test_delete_local_disabled_by_default(queue, uploader, tmp_path):
+    ts = tmp_path / 'clip_0001.ts'
+    kv = tmp_path / 'clip_0001.klv'
+    ts.write_bytes(b'ts')
+    kv.write_bytes(b'klv')
+    queue.enqueue_clip(session_id='sess-1', clip_id='clip_0001', tier='hits',
+                       ts_path=str(ts), klv_path=str(kv))
+    make_worker(queue, uploader)._process_pending()
+    assert ts.exists()
+    assert kv.exists()
+
+
+def test_delete_local_forced_off_without_uploader(queue, tmp_path):
+    # even if configured on, no uploader means local files are the only copy
+    worker = UploadWorker(queue, None, delete_local=True)
+    assert worker._delete_local is False

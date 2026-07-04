@@ -1,6 +1,5 @@
 import json
 import os
-import subprocess
 import sys
 import time
 from collections import deque
@@ -43,7 +42,7 @@ class YOLONorfairTracker:
         self.export              = capture_cfg.get('export', False)
         self.output_dir          = capture_cfg.get('output_dir', './sessions')
 
-        # S3 uploader + store-and-forward queue
+        # S3 uploader (optional — clips are transcoded either way)
         self.uploader      = None
         self.upload_queue  = None
         self.upload_worker = None
@@ -53,16 +52,7 @@ class YOLONorfairTracker:
                 prefix=upload_cfg.get('s3_prefix', ''),
                 region=upload_cfg.get('region'),
             )
-            db_path = os.path.join(
-                capture_cfg.get('output_dir', './sessions'), 'upload_queue.db'
-            )
-            self.upload_queue  = UploadQueue(db_path)
-            self.upload_worker = UploadWorker(self.upload_queue, self.uploader)
-            self.upload_worker.start()
             print(f"S3 upload enabled: s3://{upload_cfg['s3_bucket']}/{upload_cfg.get('s3_prefix', '')}")
-            pending = self.upload_queue.pending_count()
-            if pending:
-                print(f"[S3]  Resuming {pending} pending upload(s) from previous session")
 
         # Session state
         self.session_id    = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
@@ -120,6 +110,26 @@ class YOLONorfairTracker:
             jsonl_path = os.path.join(self.session_dir, 'detections.jsonl')
             self.metadata_file = open(jsonl_path, 'w')
             print(f"Exporting detection metadata to: {jsonl_path}")
+
+        # Clip-finishing worker: transcodes off the frame loop, uploads if
+        # configured. Runs when new clips are possible (target_classes) or a
+        # previous session's backlog may need draining (uploader). Started
+        # only after the webcam is confirmed open so a failed init can exit
+        # cleanly (a non-daemon thread would block the exit).
+        if self.target_classes or self.uploader:
+            self.upload_queue = UploadQueue(os.path.join(self.output_dir, 'upload_queue.db'))
+            self.upload_queue.purge_done(older_than_days=7)
+            for item in self.upload_queue.failed_items():
+                print(f"[S3]  WARNING: {item.get('clip_id') or 'summary'} "
+                      f"({item['session_id']}) gave up after {item['attempts']} attempts: {item['error']}")
+            self.upload_worker = UploadWorker(
+                self.upload_queue, self.uploader,
+                delete_local=upload_cfg.get('delete_local_after_upload', False),
+            )
+            self.upload_worker.start()
+            pending = self.upload_queue.pending_count()
+            if pending:
+                print(f"[S3]  Resuming {pending} pending item(s) from previous session")
 
         self.window_name = 'YOLOv11 + Norfair Object Tracker'
         cv2.namedWindow(self.window_name)
@@ -239,18 +249,9 @@ class YOLONorfairTracker:
             'detections':           [],
             'start_time':           datetime.now().isoformat(),
             'start_frame':          self.frame_index,
+            'preroll_frames':       len(self.preroll),
         }
         print(f"[CLIP] Started {clip_id} for '{class_name}'")
-
-    def _remux_to_ts(self, mp4_path: str, ts_path: str):
-        result = subprocess.run(
-            ['ffmpeg', '-y', '-i', mp4_path,
-             '-vcodec', 'libx264', '-crf', '23', '-preset', 'fast',
-             '-f', 'mpegts', ts_path],
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"FFmpeg transcode failed:\n{result.stderr.decode()}")
 
     def _close_clip(self):
         clip = self.active_clip
@@ -265,11 +266,8 @@ class YOLONorfairTracker:
         ts_path  = os.path.join(tier_dir, f'{clip_id}.ts')
         klv_path = os.path.join(tier_dir, f'{clip_id}.klv')
 
-        # Remux MP4 → MPEG-TS, then clean up temp MP4
-        self._remux_to_ts(clip['tmp_mp4'], ts_path)
-        os.remove(clip['tmp_mp4'])
-
-        # Move KLV sidecar into tier folder
+        # Move KLV sidecar into tier folder; the temp MP4 stays put — the
+        # worker transcodes it to ts_path off the frame loop, then deletes it
         os.rename(clip['tmp_klv'], klv_path)
 
         # JSON sidecar for human inspection
@@ -281,21 +279,23 @@ class YOLONorfairTracker:
             'peak_confidence':  round(clip['peak_confidence'], 4),
             'start_time':       clip['start_time'],
             'end_time':         datetime.now().isoformat(),
-            'total_frames':     self.frame_index - clip['start_frame'],
+            'start_frame':      clip['start_frame'],
+            'preroll_frames':   clip['preroll_frames'],
+            'total_frames':     self.frame_index - clip['start_frame'] + clip['preroll_frames'],
             'detections':       clip['detections'],
         }
         with open(os.path.join(tier_dir, f'{clip_id}.json'), 'w') as f:
             json.dump(sidecar, f, indent=2)
 
-        print(f"[CLIP] Saved {tier}/{clip_id}.ts (peak conf: {clip['peak_confidence']:.0%})")
+        print(f"[CLIP] Closed {tier}/{clip_id} (peak conf: {clip['peak_confidence']:.0%}) — queued for transcode")
 
         if self.upload_queue:
-            self.upload_queue.enqueue_clip(self.session_id, clip_id, tier, ts_path, klv_path)
-            print(f"[S3]  Queued {clip_id} for upload")
+            self.upload_queue.enqueue_clip(self.session_id, clip_id, tier,
+                                           ts_path, klv_path, mp4_path=clip['tmp_mp4'])
 
         self.active_clip = None
 
-    def _update_clip(self, raw_frame, target_hits):
+    def _update_clip(self, raw_frame, target_hits, frame_ts):
         if not self.target_classes:
             return
 
@@ -307,15 +307,18 @@ class YOLONorfairTracker:
             self.active_clip['writer'].write(raw_frame)
             if target_hits:
                 self.active_clip['frames_since_detection'] = 0
+                # 0-based position of this frame in the clip video, accounting
+                # for the pre-roll frames written ahead of the trigger frame
+                video_frame = (self.frame_index - self.active_clip['start_frame']
+                               + self.active_clip['preroll_frames'])
                 for obj in target_hits:
                     conf = obj.last_detection.data['confidence']
                     if conf > self.active_clip['peak_confidence']:
                         self.active_clip['peak_confidence'] = conf
 
-                    now = datetime.now().isoformat()
                     packet = klv.encode_packet(
-                        frame_id=self.frame_index,
-                        timestamp=now,
+                        frame_id=video_frame,
+                        timestamp=frame_ts,
                         session_id=self.session_id,
                         clip_id=self.active_clip['clip_id'],
                         track_id=int(obj.id),
@@ -326,11 +329,12 @@ class YOLONorfairTracker:
                     self.active_clip['klv_file'].write(packet)
 
                     self.active_clip['detections'].append({
-                        'frame_id':   self.frame_index,
-                        'timestamp':  now,
-                        'track_id':   obj.id,
-                        'confidence': round(float(conf), 4),
-                        'bbox':       [round(float(v), 1) for v in obj.last_detection.data['bbox']],
+                        'frame_id':      video_frame,
+                        'session_frame': self.frame_index,
+                        'timestamp':     frame_ts,
+                        'track_id':      obj.id,
+                        'confidence':    round(float(conf), 4),
+                        'bbox':          [round(float(v), 1) for v in obj.last_detection.data['bbox']],
                     })
                     cls = obj.last_detection.data['class_name']
                     self.object_counts.setdefault(cls, set()).add(obj.id)
@@ -339,13 +343,13 @@ class YOLONorfairTracker:
                 if self.active_clip['frames_since_detection'] >= self.postroll_frames:
                     self._close_clip()
 
-    def _write_export(self, target_hits):
+    def _write_export(self, target_hits, frame_ts):
         if not self.metadata_file or not target_hits:
             return
         record = {
             'session_id': self.session_id,
             'frame_id':   self.frame_index,
-            'timestamp':  datetime.now().isoformat(),
+            'timestamp':  frame_ts,
             'detections': [
                 {
                     'track_id':   obj.id,
@@ -383,6 +387,7 @@ class YOLONorfairTracker:
                     break
 
                 raw_frame = frame.copy()
+                frame_ts  = datetime.now().isoformat()
 
                 results        = self.model(frame, conf=self.conf_threshold, verbose=False)
                 detections     = self.yolo_detections_to_norfair_detections(results)
@@ -390,8 +395,8 @@ class YOLONorfairTracker:
 
                 target_hits = self._target_detections(tracked_objects)
 
-                self._update_clip(raw_frame, target_hits)
-                self._write_export(target_hits)
+                self._update_clip(raw_frame, target_hits, frame_ts)
+                self._write_export(target_hits, frame_ts)
 
                 self.preroll.append(raw_frame)
                 self.frame_index += 1
@@ -454,11 +459,11 @@ class YOLONorfairTracker:
                     json.dump(summary, f, indent=2)
                 print(f"Session summary: {summary_path}")
 
-                if self.upload_queue:
+                if self.upload_queue and self.uploader:
                     self.upload_queue.enqueue_summary(self.session_id, summary_path)
 
             if self.upload_worker:
-                print("[S3]  Waiting for uploads to complete...")
+                print("[CLIP] Finishing queued clips (transcode + upload)...")
                 self.upload_worker.stop(timeout=30)
 
             if self.metadata_file:
