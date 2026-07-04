@@ -16,7 +16,7 @@ A powerful real-time object detection and tracking application using state-of-th
 - **Live Statistics**: FPS counter, detection count, tracking count
 - **Clip-based Recording**: Automatically saves H.264/MPEG-TS clips triggered by target class detections, with 2s pre/post-roll buffers and confidence-tier classification (`hits` vs `near_misses`)
 - **Binary KLV Metadata**: Encodes per-detection data (track ID, class, confidence, bbox, timestamp) as binary KLV alongside each clip — the source of truth for the downstream pipeline
-- **Store-and-forward Upload**: Clips are queued instantly on close and uploaded to S3 asynchronously — recording never blocks on network. Failed uploads retry with exponential backoff and survive process crashes
+- **Store-and-forward Upload**: Clips are queued instantly on close; FFmpeg transcode and S3 upload both run on a background worker — recording never blocks on disk or network. Failures retry with exponential backoff and survive process crashes
 - **Local Debug Export**: Optionally writes full-session detection stream to JSON Lines for local inspection
 
 ## What Can It Detect?
@@ -283,7 +283,7 @@ The test suite covers all modules that can run without a webcam or GPU — KLV e
 conda run -n object-tracker pytest -v
 ```
 
-94 tests, ~4s:
+118 tests, ~4s:
 
 ```
 tests/test_display.py::test_draw_empty_list_does_not_crash PASSED
@@ -302,7 +302,7 @@ tests/test_upload_queue.py::test_backoff_increases_with_attempts PASSED
 tests/test_upload_worker.py::test_worker_marks_done_on_success PASSED
 tests/test_upload_worker.py::test_stop_drains_queue PASSED
 ...
-94 passed in 3.92s
+118 passed in 4.53s
 ```
 
 With coverage report:
@@ -318,9 +318,9 @@ conda run -n object-tracker pytest --cov=. --cov-report=term-missing
 | `test_klv.py` | 24 | Wire format, all-field encode/decode round-trips, multi-packet streaming via `iter_packets`, error cases (truncated header, truncated payload, oversized value) |
 | `test_uploader.py` | 17 | S3 key construction with/without prefix, correct `.ts` and `.klv` keys per tier, URI return values, `BotoCoreError`, `ClientError`, and `S3UploadFailedError` all wrapped as `RuntimeError` |
 | `test_display.py` | 11 | Track-all vs selective filtering, target-class colour logic, active-clip HUD rendering, graceful skip when `last_detection` is `None` |
-| `test_tracker.py` | 16 | `load_config` YAML parsing, `_target_detections` class and confidence filtering, `check_click_on_object` select/deselect/miss — `__init__` patched out so no webcam or model needed |
-| `test_upload_queue.py` | 17 | Enqueue/dequeue, status transitions, backoff increases with attempts, item hidden after failure until backoff expires, persistence across SQLite instances |
-| `test_upload_worker.py` | 9 | Worker uploads clips and summaries, marks done on success, marks failed on error, drains queue on stop, handles partial failures |
+| `test_tracker.py` | 21 | `load_config` YAML parsing, `_target_detections` filtering, `check_click_on_object` select/deselect/miss, clip-relative KLV frame math incl. pre-roll offset, capture-timestamp passthrough — `__init__` patched out so no webcam or model needed |
+| `test_upload_queue.py` | 26 | Enqueue/dequeue, status transitions, backoff behaviour, persistence across SQLite instances, old-schema DB migration, `failed_items` reporting, `purge_done` age cutoff and status safety |
+| `test_upload_worker.py` | 19 | Transcode-before-upload staging, temp MP4 cleanup, resume-after-crash skip, offline transcode without uploader, FFmpeg failure retry, delete-local-after-upload matrix, stop/drain behaviour |
 
 ### What's not tested (intentionally)
 
@@ -405,7 +405,7 @@ object-tracker/
 ├── klv.py                  # KLV binary metadata encoder/decoder
 ├── uploader.py             # AWS S3 upload client
 ├── upload_queue.py         # SQLite-backed store-and-forward queue
-├── upload_worker.py        # Background upload thread with exponential backoff
+├── upload_worker.py        # Background thread: FFmpeg transcode + S3 upload with backoff
 ├── config.yaml             # Local config (gitignored — edit this)
 ├── config.example.yaml     # Committed config template
 ├── environment.yml         # Conda environment (Python + FFmpeg + pip deps)
