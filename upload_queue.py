@@ -114,3 +114,22 @@ class UploadQueue:
                 "SELECT COUNT(*) FROM uploads WHERE status = 'pending' AND attempts < ?",
                 (MAX_ATTEMPTS,),
             ).fetchone()[0]
+
+    def failed_items(self) -> list[dict]:
+        """Items that exhausted MAX_ATTEMPTS — never retried, only reported."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM uploads WHERE status = 'pending' AND attempts >= ?",
+                (MAX_ATTEMPTS,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def purge_done(self, older_than_days: int = 7) -> int:
+        """Delete done rows older than the cutoff. Returns rows removed."""
+        cutoff = (datetime.now() - timedelta(days=older_than_days)).isoformat()
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM uploads WHERE status = 'done' AND created_at < ?",
+                (cutoff,),
+            )
+        return cur.rowcount

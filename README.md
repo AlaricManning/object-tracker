@@ -96,6 +96,7 @@ upload:
   s3_bucket: your-bucket-name
   s3_prefix: captures
   region: us-east-1
+  delete_local_after_upload: false  # free disk once S3 confirms the upload
 ```
 
 See `config.example.yaml` for the full annotated reference.

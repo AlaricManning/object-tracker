@@ -117,8 +117,15 @@ class YOLONorfairTracker:
         # only after the webcam is confirmed open so a failed init can exit
         # cleanly (a non-daemon thread would block the exit).
         if self.target_classes or self.uploader:
-            self.upload_queue  = UploadQueue(os.path.join(self.output_dir, 'upload_queue.db'))
-            self.upload_worker = UploadWorker(self.upload_queue, self.uploader)
+            self.upload_queue = UploadQueue(os.path.join(self.output_dir, 'upload_queue.db'))
+            self.upload_queue.purge_done(older_than_days=7)
+            for item in self.upload_queue.failed_items():
+                print(f"[S3]  WARNING: {item.get('clip_id') or 'summary'} "
+                      f"({item['session_id']}) gave up after {item['attempts']} attempts: {item['error']}")
+            self.upload_worker = UploadWorker(
+                self.upload_queue, self.uploader,
+                delete_local=upload_cfg.get('delete_local_after_upload', False),
+            )
             self.upload_worker.start()
             pending = self.upload_queue.pending_count()
             if pending:

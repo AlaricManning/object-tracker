@@ -26,11 +26,13 @@ def transcode_to_ts(mp4_path: str, ts_path: str):
 
 
 class UploadWorker(threading.Thread):
-    def __init__(self, queue: UploadQueue, uploader=None):
+    def __init__(self, queue: UploadQueue, uploader=None, delete_local=False):
         super().__init__(name='UploadWorker', daemon=False)
-        self._queue    = queue
-        self._uploader = uploader
-        self._stop_event     = threading.Event()
+        self._queue        = queue
+        self._uploader     = uploader
+        # only ever delete local files when S3 has a copy — no uploader, no delete
+        self._delete_local = delete_local and uploader is not None
+        self._stop_event   = threading.Event()
 
     def run(self):
         while not self._stop_event.is_set():
@@ -85,3 +87,7 @@ class UploadWorker(threading.Thread):
             )
             print(f"[S3]  Uploaded → {ts_uri}")
             print(f"[S3]          → {klv_uri}")
+            if self._delete_local:
+                for path in (item['ts_path'], item['klv_path']):
+                    if os.path.exists(path):
+                        os.remove(path)

@@ -189,3 +189,51 @@ def test_worker_summary_skipped_without_uploader(queue):
     queue.enqueue_summary(**SUMMARY)
     make_worker(queue, None)._process_pending()
     assert queue.pending_count() == 0  # marked done, nothing to upload
+
+
+# ---------------------------------------------------------------------------
+# delete_local_after_upload
+# ---------------------------------------------------------------------------
+
+def test_delete_local_removes_files_after_upload(queue, uploader, tmp_path):
+    ts  = tmp_path / 'clip_0001.ts'
+    kv  = tmp_path / 'clip_0001.klv'
+    ts.write_bytes(b'ts')
+    kv.write_bytes(b'klv')
+    queue.enqueue_clip(session_id='sess-1', clip_id='clip_0001', tier='hits',
+                       ts_path=str(ts), klv_path=str(kv))
+    UploadWorker(queue, uploader, delete_local=True)._process_pending()
+    assert not ts.exists()
+    assert not kv.exists()
+    assert queue.pending_count() == 0
+
+
+def test_delete_local_keeps_files_when_upload_fails(queue, uploader, tmp_path):
+    ts = tmp_path / 'clip_0001.ts'
+    kv = tmp_path / 'clip_0001.klv'
+    ts.write_bytes(b'ts')
+    kv.write_bytes(b'klv')
+    uploader.upload_clip.side_effect = RuntimeError('network down')
+    queue.enqueue_clip(session_id='sess-1', clip_id='clip_0001', tier='hits',
+                       ts_path=str(ts), klv_path=str(kv))
+    UploadWorker(queue, uploader, delete_local=True)._process_pending()
+    assert ts.exists()
+    assert kv.exists()
+
+
+def test_delete_local_disabled_by_default(queue, uploader, tmp_path):
+    ts = tmp_path / 'clip_0001.ts'
+    kv = tmp_path / 'clip_0001.klv'
+    ts.write_bytes(b'ts')
+    kv.write_bytes(b'klv')
+    queue.enqueue_clip(session_id='sess-1', clip_id='clip_0001', tier='hits',
+                       ts_path=str(ts), klv_path=str(kv))
+    make_worker(queue, uploader)._process_pending()
+    assert ts.exists()
+    assert kv.exists()
+
+
+def test_delete_local_forced_off_without_uploader(queue, tmp_path):
+    # even if configured on, no uploader means local files are the only copy
+    worker = UploadWorker(queue, None, delete_local=True)
+    assert worker._delete_local is False
