@@ -14,8 +14,10 @@ A powerful real-time object detection and tracking application using state-of-th
 - **High Performance**: ~15-30 FPS on CPU, 60+ FPS on GPU
 - **Flexible Models**: Choose from 5 YOLO model sizes for your hardware
 - **Live Statistics**: FPS counter, detection count, tracking count
-- **Clip-based Recording**: Automatically saves video clips triggered by target class detections, with 2s pre/post-roll buffers and confidence-tier classification (`hits` vs `near_misses`)
-- **Per-frame Metadata Export**: Writes detection data (track ID, class, confidence, bounding box, timestamp) to JSON Lines for downstream pipeline ingestion
+- **Clip-based Recording**: Automatically saves H.264/MPEG-TS clips triggered by target class detections, with 2s pre/post-roll buffers and confidence-tier classification (`hits` vs `near_misses`)
+- **Binary KLV Metadata**: Encodes per-detection data (track ID, class, confidence, bbox, timestamp) as binary KLV alongside each clip — the source of truth for the downstream pipeline
+- **Store-and-forward Upload**: Clips are queued instantly on close and uploaded to S3 asynchronously — recording never blocks on network. Failed uploads retry with exponential backoff and survive process crashes
+- **Local Debug Export**: Optionally writes full-session detection stream to JSON Lines for local inspection
 
 ## What Can It Detect?
 
@@ -259,16 +261,15 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 ### Import Errors
 **Error**: "No module named 'ultralytics'" or similar
 
-**Solution**:
+The conda environment is probably not active. Run:
 ```bash
-pip install -r requirements.txt
+conda activate object-tracker
 ```
 
-**Error**: "No module named 'torch'"
-
-**Solution**:
+If the environment doesn't exist yet:
 ```bash
-pip install torch torchvision
+conda env create -f environment.yml
+conda activate object-tracker
 ```
 
 ## Testing
@@ -281,7 +282,7 @@ The test suite covers all modules that can run without a webcam or GPU — KLV e
 conda run -n object-tracker pytest -v
 ```
 
-67 tests, ~1.5s:
+94 tests, ~4s:
 
 ```
 tests/test_display.py::test_draw_empty_list_does_not_crash PASSED
@@ -294,10 +295,13 @@ tests/test_klv.py::test_truncated_payload_raises PASSED
 tests/test_uploader.py::test_upload_clip_ts_key PASSED
 tests/test_uploader.py::test_upload_clip_wraps_botocore_error PASSED
 ...
-tests/test_tracker.py::test_target_detections_filters_low_confidence PASSED
-tests/test_tracker.py::test_click_selects_object PASSED
+tests/test_upload_queue.py::test_persists_across_instances PASSED
+tests/test_upload_queue.py::test_backoff_increases_with_attempts PASSED
 ...
-67 passed in 1.41s
+tests/test_upload_worker.py::test_worker_marks_done_on_success PASSED
+tests/test_upload_worker.py::test_stop_drains_queue PASSED
+...
+94 passed in 3.92s
 ```
 
 With coverage report:
@@ -311,9 +315,11 @@ conda run -n object-tracker pytest --cov=. --cov-report=term-missing
 | File | Tests | What's covered |
 |------|-------|----------------|
 | `test_klv.py` | 24 | Wire format, all-field encode/decode round-trips, multi-packet streaming via `iter_packets`, error cases (truncated header, truncated payload, oversized value) |
-| `test_uploader.py` | 16 | S3 key construction with/without prefix, correct `.ts` and `.klv` keys per tier, URI return values, `BotoCoreError` and `ClientError` both wrapped as `RuntimeError` |
+| `test_uploader.py` | 17 | S3 key construction with/without prefix, correct `.ts` and `.klv` keys per tier, URI return values, `BotoCoreError`, `ClientError`, and `S3UploadFailedError` all wrapped as `RuntimeError` |
 | `test_display.py` | 11 | Track-all vs selective filtering, target-class colour logic, active-clip HUD rendering, graceful skip when `last_detection` is `None` |
 | `test_tracker.py` | 16 | `load_config` YAML parsing, `_target_detections` class and confidence filtering, `check_click_on_object` select/deselect/miss — `__init__` patched out so no webcam or model needed |
+| `test_upload_queue.py` | 17 | Enqueue/dequeue, status transitions, backoff increases with attempts, item hidden after failure until backoff expires, persistence across SQLite instances |
+| `test_upload_worker.py` | 9 | Worker uploads clips and summaries, marks done on success, marks failed on error, drains queue on stop, handles partial failures |
 
 ### What's not tested (intentionally)
 
@@ -351,11 +357,18 @@ Webcam → Frame → YOLOv11 Detection → Norfair Tracking → Display
                    ↓                                       not uploaded to S3
         sessions/{session_id}/
           hits/clip_N.ts          ← video
-          hits/clip_N.klv         ← binary detection metadata (uploaded to S3)
-          hits/clip_N.json        ← human-readable copy of KLV — local only
+          hits/clip_N.klv         ← binary detection metadata
+          hits/clip_N.json        ← human-readable sidecar — local only
           near_misses/  (same structure)
-          session_summary.json    ← session stats (uploaded to S3)
-          detections.jsonl        ← local only (see above)
+          session_summary.json    ← session stats
+          detections.jsonl        ← local only
+          upload_queue.db         ← SQLite upload queue (persists across runs)
+                   ↓
+        Store-and-forward queue   (upload_queue.py + upload_worker.py)
+          • enqueued instantly on clip close — recording never blocks
+          • background thread uploads asynchronously
+          • exponential backoff on failure (5s → 300s cap, 10 attempts)
+          • survives crashes — retried automatically on next run
                    ↓
            AWS S3 upload          (if upload.enabled in config)
       raw/{session_id}/hits/
@@ -390,17 +403,27 @@ object-tracker/
 ├── display.py              # HUD drawing functions (bounding boxes, info panel)
 ├── klv.py                  # KLV binary metadata encoder/decoder
 ├── uploader.py             # AWS S3 upload client
+├── upload_queue.py         # SQLite-backed store-and-forward queue
+├── upload_worker.py        # Background upload thread with exponential backoff
 ├── config.yaml             # Local config (gitignored — edit this)
 ├── config.example.yaml     # Committed config template
 ├── environment.yml         # Conda environment (Python + FFmpeg + pip deps)
-├── requirements.txt        # Pip dependencies
+├── pytest.ini              # Test configuration
 ├── README.md               # This file
+├── tests/
+│   ├── test_klv.py
+│   ├── test_uploader.py
+│   ├── test_display.py
+│   ├── test_tracker.py
+│   ├── test_upload_queue.py
+│   └── test_upload_worker.py
 └── sessions/               # Created automatically when target_classes is set
+    ├── upload_queue.db     # Persistent upload queue — survives crashes
     └── {session_id}/
         ├── hits/               # Clips where peak confidence >= hit_threshold
         │   ├── clip_0001.ts    # H.264 video in MPEG-TS container
         │   ├── clip_0001.klv   # Binary KLV detection metadata
-        │   └── clip_0001.json  # Human-readable sidecar
+        │   └── clip_0001.json  # Human-readable sidecar (local only)
         ├── near_misses/        # Clips where confidence is between thresholds
         │   ├── clip_0002.ts
         │   ├── clip_0002.klv
@@ -424,14 +447,12 @@ Tested on different hardware configurations:
 
 ## Future Enhancements
 
-Possible improvements for future versions:
-- ETL layer: unpack KLV from S3, write detection records to Parquet catalog
-- Querying: Athena / DuckDB over Parquet for analytics ("show all near-miss clips from last week")
-- Labeling workflow: pull near-miss clips into CVAT / Label Studio for human review
-- True MISB ST 0601 KLV: embed metadata as a PID inside the MPEG-TS stream
-- Custom object classes with fine-tuned models
-- Multiple camera support
-- Heatmap and path history visualization
+- **Pipeline repo** *(in progress)*: ELT layer to unpack KLV from S3, write detection records to Parquet catalog; Athena / DuckDB for SQL queries over clips ("show all near-miss clips from last week")
+- **Labeling workflow**: pull near-miss clips into CVAT / Label Studio for human review and model fine-tuning
+- **True MISB ST 0601 KLV**: embed metadata as a PID inside the MPEG-TS stream for full ATAK / FalconView interoperability
+- **Containerization**: Dockerfile for reproducible edge deployment (Jetson, Raspberry Pi)
+- **MQTT**: real-time event notification to AWS IoT Core on clip close, enabling event-driven pipeline triggers
+- **Multiple camera support**
 
 ## Comparison: Classical vs Deep Learning Tracking
 
@@ -465,8 +486,6 @@ This project is provided as-is for personal and educational use.
 - **OpenCV**: Open Source Computer Vision Library
 
 ---
-
-**Enjoy tracking!** For questions or improvements, feel free to modify the code to suit your needs.
 
 ## Quick Start Examples
 
