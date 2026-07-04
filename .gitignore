@@ -11,17 +11,17 @@
 .DS_Store
 Thumbs.db
 
-# Session capture output — exclude video and binary metadata, keep JSON as examples
-sessions/**/*.mp4
-sessions/**/*.ts
-sessions/**/*.klv
+# Session capture output — local artifacts only; S3 is the real destination
+sessions/
 *.pt
+
+# Python bytecode and test caches
+__pycache__/
+*.pyc
+.pytest_cache/
 
 # Local config (use config.example.yaml as the committed template)
 config.yaml
-
-# Upload queue database (persists locally across runs, not part of the repo)
-sessions/upload_queue.db
 
 # IDE
 .vscode/
