@@ -36,6 +36,7 @@ class UploadQueue:
                     session_id   TEXT NOT NULL,
                     clip_id      TEXT,
                     tier         TEXT,
+                    mp4_path     TEXT,
                     ts_path      TEXT,
                     klv_path     TEXT,
                     local_path   TEXT,
@@ -46,15 +47,19 @@ class UploadQueue:
                     created_at   TEXT NOT NULL
                 )
             ''')
+            # Migrate DBs created before the transcode stage moved to the worker
+            cols = [r['name'] for r in conn.execute('PRAGMA table_info(uploads)')]
+            if 'mp4_path' not in cols:
+                conn.execute('ALTER TABLE uploads ADD COLUMN mp4_path TEXT')
 
     def enqueue_clip(self, session_id: str, clip_id: str, tier: str,
-                     ts_path: str, klv_path: str):
+                     ts_path: str, klv_path: str, mp4_path: str = None):
         with self._conn() as conn:
             conn.execute(
                 '''INSERT INTO uploads
-                   (type, session_id, clip_id, tier, ts_path, klv_path, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                ('clip', session_id, clip_id, tier, ts_path, klv_path,
+                   (type, session_id, clip_id, tier, ts_path, klv_path, mp4_path, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                ('clip', session_id, clip_id, tier, ts_path, klv_path, mp4_path,
                  datetime.now().isoformat()),
             )
 

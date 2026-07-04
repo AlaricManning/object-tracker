@@ -59,6 +59,42 @@ def test_get_pending_returns_clip_fields(queue):
     assert item['klv_path']   == '/tmp/clip.klv'
 
 
+def test_mp4_path_round_trips(queue):
+    queue.enqueue_clip(**CLIP, mp4_path='/tmp/_clip_0001_tmp.mp4')
+    assert queue.get_pending()[0]['mp4_path'] == '/tmp/_clip_0001_tmp.mp4'
+
+
+def test_mp4_path_defaults_to_none(queue):
+    queue.enqueue_clip(**CLIP)
+    assert queue.get_pending()[0]['mp4_path'] is None
+
+
+def test_migrates_db_without_mp4_path_column(tmp_path):
+    # DBs created before the transcode stage moved into the worker
+    import sqlite3
+    db = str(tmp_path / 'upload_queue.db')
+    with sqlite3.connect(db) as conn:
+        conn.execute('''
+            CREATE TABLE uploads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL, session_id TEXT NOT NULL,
+                clip_id TEXT, tier TEXT, ts_path TEXT, klv_path TEXT,
+                local_path TEXT, status TEXT DEFAULT 'pending',
+                attempts INTEGER DEFAULT 0, next_retry_at TEXT,
+                error TEXT, created_at TEXT NOT NULL
+            )
+        ''')
+        conn.execute(
+            "INSERT INTO uploads (type, session_id, clip_id, tier, ts_path, klv_path, created_at) "
+            "VALUES ('clip', 'old-sess', 'clip_0001', 'hits', '/tmp/c.ts', '/tmp/c.klv', ?)",
+            (datetime.now().isoformat(),),
+        )
+    q = UploadQueue(db)
+    item = q.get_pending()[0]
+    assert item['clip_id'] == 'clip_0001'
+    assert item['mp4_path'] is None
+
+
 def test_get_pending_returns_summary_fields(queue):
     queue.enqueue_summary(**SUMMARY)
     item = queue.get_pending()[0]
