@@ -182,3 +182,83 @@ def test_click_clears_clicking_pos_after_use():
     t.clicking_pos = (100, 100)
     t.check_click_on_object([obj])
     assert t.clicking_pos is None
+
+
+# ---------------------------------------------------------------------------
+# _update_clip — clip-relative frame IDs and capture timestamps
+# ---------------------------------------------------------------------------
+
+import io
+import klv
+
+
+def make_recording_tracker(start_frame=100, preroll_frames=40, frame_index=105):
+    """Tracker with an active clip whose klv_file is an in-memory buffer."""
+    t = make_tracker(
+        session_id='sess-test',
+        frame_index=frame_index,
+        object_counts={},
+        postroll_frames=40,
+    )
+    t.active_clip = {
+        'clip_id':                'clip_0001',
+        'writer':                 MagicMock(),
+        'klv_file':               io.BytesIO(),
+        'class_name':             'person',
+        'peak_confidence':        0.0,
+        'frames_since_detection': 0,
+        'detections':             [],
+        'start_frame':            start_frame,
+        'preroll_frames':         preroll_frames,
+    }
+    return t
+
+
+def test_klv_frame_id_is_clip_relative():
+    # session frame 105, clip triggered at 100 with 40 pre-roll frames
+    # → this frame is video frame 45 of the clip file
+    t = make_recording_tracker(start_frame=100, preroll_frames=40, frame_index=105)
+    t._update_clip(MagicMock(), [make_tracked_obj()], '2026-07-04T12:00:00')
+    packet, _ = klv.decode_packet(t.active_clip['klv_file'].getvalue())
+    assert packet['frame_id'] == 45
+
+
+def test_klv_frame_id_on_trigger_frame_equals_preroll_count():
+    t = make_recording_tracker(start_frame=100, preroll_frames=40, frame_index=100)
+    t._update_clip(MagicMock(), [make_tracked_obj()], '2026-07-04T12:00:00')
+    packet, _ = klv.decode_packet(t.active_clip['klv_file'].getvalue())
+    assert packet['frame_id'] == 40
+
+
+def test_klv_timestamp_is_passed_frame_ts():
+    t = make_recording_tracker()
+    t._update_clip(MagicMock(), [make_tracked_obj()], '2026-07-04T09:30:00.123456')
+    packet, _ = klv.decode_packet(t.active_clip['klv_file'].getvalue())
+    assert packet['timestamp'] == '2026-07-04T09:30:00.123456'
+
+
+def test_sidecar_detection_has_video_and_session_frame():
+    t = make_recording_tracker(start_frame=100, preroll_frames=40, frame_index=105)
+    t._update_clip(MagicMock(), [make_tracked_obj()], '2026-07-04T12:00:00')
+    det = t.active_clip['detections'][0]
+    assert det['frame_id'] == 45          # matches KLV / video file
+    assert det['session_frame'] == 105    # session-wide, local debugging only
+    assert det['timestamp'] == '2026-07-04T12:00:00'
+
+
+def test_start_clip_records_preroll_count(tmp_path):
+    from collections import deque
+    t = make_tracker(
+        clip_count=0,
+        session_dir=str(tmp_path),
+        frame_index=10,
+        record_fps=20,
+        width=640,
+        height=480,
+        preroll=deque(['f1', 'f2', 'f3']),
+    )
+    with patch('tracker.cv2.VideoWriter') as writer_cls:
+        t._start_clip('person')
+    assert t.active_clip['preroll_frames'] == 3
+    assert t.active_clip['start_frame'] == 10
+    assert writer_cls.return_value.write.call_count == 3

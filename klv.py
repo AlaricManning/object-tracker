@@ -7,10 +7,15 @@ Wire format per packet:
 
 Custom schema — not MISB ST 0601. Migrate to ST 0601 Universal Keys when
 interoperability with ATAK / Falcon View is required.
+
+FRAME_ID is the 0-based frame index within the clip's video file (pre-roll
+frames included), so frame N in the KLV addresses frame N of the paired .ts —
+no external offset table needed. TIMESTAMP is stamped at frame capture, not
+at encode time.
 """
 import struct
 
-TAG_FRAME_ID    = 0x01  # uint32 BE
+TAG_FRAME_ID    = 0x01  # uint32 BE — 0-based frame index within the clip video
 TAG_TIMESTAMP   = 0x02  # UTF-8 string
 TAG_TRACK_ID    = 0x03  # uint32 BE
 TAG_CLASS_NAME  = 0x04  # UTF-8 string

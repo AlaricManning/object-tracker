@@ -239,6 +239,7 @@ class YOLONorfairTracker:
             'detections':           [],
             'start_time':           datetime.now().isoformat(),
             'start_frame':          self.frame_index,
+            'preroll_frames':       len(self.preroll),
         }
         print(f"[CLIP] Started {clip_id} for '{class_name}'")
 
@@ -281,7 +282,9 @@ class YOLONorfairTracker:
             'peak_confidence':  round(clip['peak_confidence'], 4),
             'start_time':       clip['start_time'],
             'end_time':         datetime.now().isoformat(),
-            'total_frames':     self.frame_index - clip['start_frame'],
+            'start_frame':      clip['start_frame'],
+            'preroll_frames':   clip['preroll_frames'],
+            'total_frames':     self.frame_index - clip['start_frame'] + clip['preroll_frames'],
             'detections':       clip['detections'],
         }
         with open(os.path.join(tier_dir, f'{clip_id}.json'), 'w') as f:
@@ -295,7 +298,7 @@ class YOLONorfairTracker:
 
         self.active_clip = None
 
-    def _update_clip(self, raw_frame, target_hits):
+    def _update_clip(self, raw_frame, target_hits, frame_ts):
         if not self.target_classes:
             return
 
@@ -307,15 +310,18 @@ class YOLONorfairTracker:
             self.active_clip['writer'].write(raw_frame)
             if target_hits:
                 self.active_clip['frames_since_detection'] = 0
+                # 0-based position of this frame in the clip video, accounting
+                # for the pre-roll frames written ahead of the trigger frame
+                video_frame = (self.frame_index - self.active_clip['start_frame']
+                               + self.active_clip['preroll_frames'])
                 for obj in target_hits:
                     conf = obj.last_detection.data['confidence']
                     if conf > self.active_clip['peak_confidence']:
                         self.active_clip['peak_confidence'] = conf
 
-                    now = datetime.now().isoformat()
                     packet = klv.encode_packet(
-                        frame_id=self.frame_index,
-                        timestamp=now,
+                        frame_id=video_frame,
+                        timestamp=frame_ts,
                         session_id=self.session_id,
                         clip_id=self.active_clip['clip_id'],
                         track_id=int(obj.id),
@@ -326,11 +332,12 @@ class YOLONorfairTracker:
                     self.active_clip['klv_file'].write(packet)
 
                     self.active_clip['detections'].append({
-                        'frame_id':   self.frame_index,
-                        'timestamp':  now,
-                        'track_id':   obj.id,
-                        'confidence': round(float(conf), 4),
-                        'bbox':       [round(float(v), 1) for v in obj.last_detection.data['bbox']],
+                        'frame_id':      video_frame,
+                        'session_frame': self.frame_index,
+                        'timestamp':     frame_ts,
+                        'track_id':      obj.id,
+                        'confidence':    round(float(conf), 4),
+                        'bbox':          [round(float(v), 1) for v in obj.last_detection.data['bbox']],
                     })
                     cls = obj.last_detection.data['class_name']
                     self.object_counts.setdefault(cls, set()).add(obj.id)
@@ -339,13 +346,13 @@ class YOLONorfairTracker:
                 if self.active_clip['frames_since_detection'] >= self.postroll_frames:
                     self._close_clip()
 
-    def _write_export(self, target_hits):
+    def _write_export(self, target_hits, frame_ts):
         if not self.metadata_file or not target_hits:
             return
         record = {
             'session_id': self.session_id,
             'frame_id':   self.frame_index,
-            'timestamp':  datetime.now().isoformat(),
+            'timestamp':  frame_ts,
             'detections': [
                 {
                     'track_id':   obj.id,
@@ -383,6 +390,7 @@ class YOLONorfairTracker:
                     break
 
                 raw_frame = frame.copy()
+                frame_ts  = datetime.now().isoformat()
 
                 results        = self.model(frame, conf=self.conf_threshold, verbose=False)
                 detections     = self.yolo_detections_to_norfair_detections(results)
@@ -390,8 +398,8 @@ class YOLONorfairTracker:
 
                 target_hits = self._target_detections(tracked_objects)
 
-                self._update_clip(raw_frame, target_hits)
-                self._write_export(target_hits)
+                self._update_clip(raw_frame, target_hits, frame_ts)
+                self._write_export(target_hits, frame_ts)
 
                 self.preroll.append(raw_frame)
                 self.frame_index += 1
