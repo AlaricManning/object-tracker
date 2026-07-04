@@ -20,6 +20,9 @@ sessions/**/*.klv
 # Local config (use config.example.yaml as the committed template)
 config.yaml
 
+# Upload queue database (persists locally across runs, not part of the repo)
+sessions/upload_queue.db
+
 # IDE
 .vscode/
 .idea/

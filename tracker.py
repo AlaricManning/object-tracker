@@ -15,6 +15,8 @@ from norfair import Detection, Tracker
 import klv
 import display as hud
 from uploader import S3Uploader
+from upload_queue import UploadQueue
+from upload_worker import UploadWorker
 
 
 def load_config(path: str) -> dict:
@@ -41,15 +43,26 @@ class YOLONorfairTracker:
         self.export              = capture_cfg.get('export', False)
         self.output_dir          = capture_cfg.get('output_dir', './sessions')
 
-        # S3 uploader
-        self.uploader = None
+        # S3 uploader + store-and-forward queue
+        self.uploader      = None
+        self.upload_queue  = None
+        self.upload_worker = None
         if upload_cfg.get('enabled') and upload_cfg.get('s3_bucket'):
             self.uploader = S3Uploader(
                 bucket=upload_cfg['s3_bucket'],
                 prefix=upload_cfg.get('s3_prefix', ''),
                 region=upload_cfg.get('region'),
             )
+            db_path = os.path.join(
+                capture_cfg.get('output_dir', './sessions'), 'upload_queue.db'
+            )
+            self.upload_queue  = UploadQueue(db_path)
+            self.upload_worker = UploadWorker(self.upload_queue, self.uploader)
+            self.upload_worker.start()
             print(f"S3 upload enabled: s3://{upload_cfg['s3_bucket']}/{upload_cfg.get('s3_prefix', '')}")
+            pending = self.upload_queue.pending_count()
+            if pending:
+                print(f"[S3]  Resuming {pending} pending upload(s) from previous session")
 
         # Session state
         self.session_id    = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
@@ -276,15 +289,9 @@ class YOLONorfairTracker:
 
         print(f"[CLIP] Saved {tier}/{clip_id}.ts (peak conf: {clip['peak_confidence']:.0%})")
 
-        if self.uploader:
-            try:
-                ts_uri, klv_uri = self.uploader.upload_clip(
-                    ts_path, klv_path, self.session_id, clip_id, tier
-                )
-                print(f"[S3]  Uploaded → {ts_uri}")
-                print(f"[S3]          → {klv_uri}")
-            except RuntimeError as e:
-                print(f"[S3]  Upload failed: {e}")
+        if self.upload_queue:
+            self.upload_queue.enqueue_clip(self.session_id, clip_id, tier, ts_path, klv_path)
+            print(f"[S3]  Queued {clip_id} for upload")
 
         self.active_clip = None
 
@@ -447,12 +454,12 @@ class YOLONorfairTracker:
                     json.dump(summary, f, indent=2)
                 print(f"Session summary: {summary_path}")
 
-                if self.uploader:
-                    try:
-                        uri = self.uploader.upload_summary(summary_path, self.session_id)
-                        print(f"[S3]  Summary → {uri}")
-                    except RuntimeError as e:
-                        print(f"[S3]  Summary upload failed: {e}")
+                if self.upload_queue:
+                    self.upload_queue.enqueue_summary(self.session_id, summary_path)
+
+            if self.upload_worker:
+                print("[S3]  Waiting for uploads to complete...")
+                self.upload_worker.stop(timeout=30)
 
             if self.metadata_file:
                 self.metadata_file.close()

@@ -4,6 +4,7 @@ boto3 is mocked throughout; no real AWS calls are made.
 """
 import pytest
 from unittest.mock import MagicMock, patch, call
+import boto3.exceptions
 from botocore.exceptions import BotoCoreError, ClientError
 
 from uploader import S3Uploader
@@ -97,6 +98,14 @@ def test_upload_clip_wraps_client_error():
     u = make_uploader()
     u.client = MagicMock()
     u.client.upload_file.side_effect = ClientError({'Error': {'Code': '403', 'Message': 'Forbidden'}}, 'PutObject')
+    with pytest.raises(RuntimeError, match="S3 upload failed"):
+        u.upload_clip('/tmp/clip.ts', '/tmp/clip.klv', 'sess-1', 'clip_0001', 'hits')
+
+
+def test_upload_clip_wraps_s3_upload_failed_error():
+    u = make_uploader()
+    u.client = MagicMock()
+    u.client.upload_file.side_effect = boto3.exceptions.S3UploadFailedError()
     with pytest.raises(RuntimeError, match="S3 upload failed"):
         u.upload_clip('/tmp/clip.ts', '/tmp/clip.klv', 'sess-1', 'clip_0001', 'hits')
 

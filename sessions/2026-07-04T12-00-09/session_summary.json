@@ -1,0 +1,15 @@
+{
+  "session_id": "2026-07-04T12-00-09",
+  "start_time": "2026-07-04T12:00:09.572299",
+  "end_time": "2026-07-04T12:00:14.999831",
+  "total_frames": 76,
+  "clips_saved": 1,
+  "target_classes": [
+    "person"
+  ],
+  "hit_threshold": 0.8,
+  "near_miss_threshold": 0.3,
+  "object_counts": {
+    "person": 1
+  }
+}

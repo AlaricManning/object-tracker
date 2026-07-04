@@ -5,7 +5,10 @@ Credentials via ~/.aws/credentials or environment variables:
 """
 import os
 import boto3
+import boto3.exceptions
 from botocore.exceptions import BotoCoreError, ClientError
+
+_BOTO_ERRORS = (BotoCoreError, ClientError, boto3.exceptions.S3UploadFailedError)
 
 
 class S3Uploader:
@@ -42,7 +45,7 @@ class S3Uploader:
         try:
             ts_uri  = self.upload_file(ts_path,  ts_key)
             klv_uri = self.upload_file(klv_path, klv_key)
-        except (BotoCoreError, ClientError) as e:
+        except _BOTO_ERRORS as e:
             raise RuntimeError(f"S3 upload failed for {clip_id}: {e}") from e
 
         return ts_uri, klv_uri
@@ -52,5 +55,5 @@ class S3Uploader:
         key = self._key(session_id, 'session_summary.json')
         try:
             return self.upload_file(local_path, key)
-        except (BotoCoreError, ClientError) as e:
+        except _BOTO_ERRORS as e:
             raise RuntimeError(f"S3 summary upload failed: {e}") from e
