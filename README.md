@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/348354e3-d7a1-4f6a-9cf3-3f3b6b785e80
+
 # YOLOv11 + Norfair Multi-Object Tracker
 
 A powerful real-time object detection and tracking application using state-of-the-art deep learning. This application combines **YOLOv11** (Ultralytics) for object detection with **Norfair** for robust multi-object tracking, allowing you to automatically detect and track objects, people, vehicles, and more through your webcam feed.
