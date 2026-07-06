@@ -2,12 +2,14 @@
 
 A powerful real-time object detection and tracking application using state-of-the-art deep learning. This application combines **YOLOv11** (Ultralytics) for object detection with **Norfair** for robust multi-object tracking, allowing you to automatically detect and track objects, people, vehicles, and more through your webcam feed.
 
+
 ![Object tracker demo — detection, clip recording, and S3 upload](assets/demo.gif)
 
 *Live detection with clip recording and store-and-forward S3 upload. Full-quality video in the [Demo Video](#demo-video) section below.*
 
 ## Demo Video
-https://github.com/user-attachments/assets/348354e3-d7a1-4f6a-9cf3-3f3b6b785e80
+
+https://github.com/user-attachments/assets/10c206a1-cdab-4be4-ab51-1f16790747e7
 
 ## Features
 
