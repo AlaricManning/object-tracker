@@ -389,7 +389,7 @@ Webcam → Frame → YOLOv11 Detection → Norfair Tracking → Display
         session_summary.json      ✓ session-level stats
 ```
 
-The KLV file is the source of truth for detection metadata in S3. The pipeline repo reads KLV from `raw/` and unpacks it into a Parquet catalog for querying. The JSON sidecar serves the same data locally in human-readable form but is not part of the pipeline.
+The KLV file is the source of truth for detection metadata in S3. The [pipeline repo](https://github.com/AlaricManning/object-tracker-pipeline) reads KLV from `raw/` and unpacks it into a Parquet catalog for querying (see [Downstream Pipeline](#downstream-pipeline)). The JSON sidecar serves the same data locally in human-readable form but is not part of the pipeline.
 
 ### YOLO Models
 - **Framework**: Ultralytics YOLOv11 (latest version)
@@ -455,9 +455,14 @@ Tested on different hardware configurations:
 | RTX 3060 GPU | medium | 1280x720 | ~70 | High accuracy |
 | RTX 4090 GPU | large | 1280x720 | ~110 | Maximum quality |
 
+## Downstream Pipeline
+
+This repo's job ends at S3. A companion repo, [object-tracker-pipeline](https://github.com/AlaricManning/object-tracker-pipeline), picks up from there: an ELT layer that incrementally syncs `.klv` files from `raw/`, unpacks them into a date-partitioned Parquet catalog (`catalog/detections/date=YYYY-MM-DD/`), and makes detections queryable with plain SQL via DuckDB or Amazon Athena — e.g. "show all near-miss clips from the last week", with each result row linking back to its `.ts` clip in S3.
+
+The two repos share only the S3 bucket and the KLV wire format (parser vendored on the pipeline side) — no code dependencies in either direction.
+
 ## Future Enhancements
 
-- **Pipeline repo** *(in progress)*: ELT layer to unpack KLV from S3, write detection records to Parquet catalog; Athena / DuckDB for SQL queries over clips ("show all near-miss clips from last week")
 - **Labeling workflow**: pull near-miss clips into CVAT / Label Studio for human review and model fine-tuning
 - **True MISB ST 0601 KLV**: embed metadata as a PID inside the MPEG-TS stream for full ATAK / FalconView interoperability
 - **Containerization**: Dockerfile for reproducible edge deployment (Jetson, Raspberry Pi)
