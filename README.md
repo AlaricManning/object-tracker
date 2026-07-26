@@ -492,7 +492,17 @@ The two repos share only the S3 bucket and the KLV wire format (parser vendored 
 
 ## License
 
-This project is provided as-is for personal and educational use.
+AGPL-3.0 — see [LICENSE](LICENSE). Copyright (c) 2026 Alaric Manning.
+
+Inherited rather than chosen. This tracker runs Ultralytics YOLOv11, which is
+AGPL-3.0, so the combined work carries the same terms. Anyone may use, modify
+and redistribute it, including running it as a network service, provided they
+publish their source under AGPL-3.0 as well. Using it commercially without that
+obligation needs a license from Ultralytics, not from me.
+
+The sibling repositories are MIT, since none of them depend on Ultralytics:
+[drone-synthetic](https://github.com/AlaricManning/drone-synthetic) and
+[object-tracker-pipeline](https://github.com/AlaricManning/object-tracker-pipeline).
 
 ## Credits
 
