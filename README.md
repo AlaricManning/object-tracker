@@ -500,9 +500,10 @@ and redistribute it, including running it as a network service, provided they
 publish their source under AGPL-3.0 as well. Using it commercially without that
 obligation needs a license from Ultralytics, not from me.
 
-The sibling repositories are MIT, since none of them depend on Ultralytics:
+This applies to this repository alone. The sibling repositories,
 [drone-synthetic](https://github.com/AlaricManning/drone-synthetic) and
-[object-tracker-pipeline](https://github.com/AlaricManning/object-tracker-pipeline).
+[object-tracker-pipeline](https://github.com/AlaricManning/object-tracker-pipeline),
+depend on nothing under AGPL and grant no licence — all rights reserved there.
 
 ## Credits
 
